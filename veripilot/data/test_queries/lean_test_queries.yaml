@@ -1,0 +1,60 @@
+# Test queries for Lean RAG validation
+# Used by tests/integration/test_lean_rag.py
+
+type_index_queries:
+  - query: "invert_spec"
+    expected_patterns: ["invert"]
+    description: "Exact name match for scalar inversion spec"
+
+  - query: "ZERO"
+    expected_patterns: ["zero", "ZERO"]
+    description: "Find zero-related constants and lemmas"
+
+  - query: "Scalar52"
+    expected_patterns: ["Scalar52"]
+    description: "Find 52-bit scalar type declarations"
+
+keyword_queries:
+  - query: "multiplicative inverse"
+    expected_patterns: ["invert", "inverse"]
+    description: "Keyword search for inverse operations"
+
+  - query: "Edwards curve"
+    expected_patterns: ["edwards", "curve"]
+    description: "Find Edwards curve operations"
+
+  - query: "Montgomery form"
+    expected_patterns: ["montgomery"]
+    description: "Find Montgomery form conversions"
+
+semantic_queries:
+  - query: "how to convert bytes to a scalar value"
+    expected_patterns: ["bytes", "from", "scalar"]
+    description: "Natural language query about byte conversion"
+
+  - query: "prove that field addition is correct"
+    expected_patterns: ["field", "add"]
+    description: "Natural language about field arithmetic"
+
+  - query: "what tactics close reflexivity goals"
+    expected_patterns: ["rfl", "refl", "decide"]
+    description: "Query about tactics"
+
+graph_queries:
+  - query: "dependencies of add_spec"
+    seed: "add_spec"
+    expected_relationships: ["DEPENDS_ON"]
+    description: "Find lemmas that add_spec depends on"
+
+  - query: "theorems using simp"
+    tactic: "simp"
+    description: "Find theorems that use the simp tactic"
+
+# Validation targets
+targets:
+  type_index_latency_ms: 100
+  bm25_latency_ms: 500
+  semantic_latency_ms: 2000
+  graph_latency_ms: 5000
+  overall_latency_ms: 2000
+  relevance_score: 0.8
