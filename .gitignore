@@ -205,3 +205,27 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+
+# LLM's
+CLAUDE.md 
+AGENT.md 
+claude-helpers/
+docs/
+
+# VeriPilot-specific ignores
+veripilot/data/lean_index/
+veripilot/data/verus_index/
+veripilot/data/embeddings/
+veripilot/.venv/
+veripilot/__pycache__/
+veripilot/.pytest_cache/
+
+# Don't ignore submodule tracking
+!.gitmodules
+
+# Test fixtures are symlinks (tracked)
+!veripilot/tests/fixtures/
+
+# Local scripts
+init-veripilot.sh 

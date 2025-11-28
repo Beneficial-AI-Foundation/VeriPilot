@@ -1,0 +1,6 @@
+[submodule "lean-projects/dalek-verify-lean"]
+	path = lean-projects/dalek-verify-lean
+	url = https://github.com/Beneficial-Ai-Foundation/curve25519-dalek-lean-verify.git
+[submodule "verus-projects/dalek-lite"]
+	path = verus-projects/dalek-lite
+	url = https://github.com/Beneficial-AI-Foundation/dalek-lite.git
