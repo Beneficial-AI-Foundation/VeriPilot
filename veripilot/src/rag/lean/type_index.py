@@ -1,8 +1,9 @@
 """
 DuckDB type index for fast Lean declaration lookup.
 
-This module provides <100ms queries for exact name and
-type signature matching using DuckDB.
+This module provides:
+- <100ms queries for exact name and type signature matching (Level 1: Type Index)
+- <500ms BM25/full-text search using DuckDB FTS extension (Level 2: BM25)
 """
 from __future__ import annotations
 
@@ -98,7 +99,37 @@ class LeanTypeIndex(Indexer):
             ON {self.TABLE_NAME}(namespace)
         """)
 
+        # Enable and setup FTS (Full-Text Search) extension for BM25
+        self._setup_fts(conn)
+
         console.print(f"[green]DuckDB schema ready: {self.db_path}[/green]")
+
+    def _setup_fts(self, conn: duckdb.DuckDBPyConnection) -> None:
+        """Setup DuckDB Full-Text Search for BM25 queries."""
+        try:
+            # Install and load FTS extension
+            conn.execute("INSTALL fts")
+            conn.execute("LOAD fts")
+
+            # Create FTS index on searchable text fields
+            # DuckDB FTS uses pragma to create the index
+            conn.execute(f"""
+                PRAGMA create_fts_index(
+                    '{self.TABLE_NAME}',
+                    'id',
+                    'name', 'full_name', 'type_signature', 'doc_string', 'proof_preview',
+                    stemmer = 'none',
+                    stopwords = 'none',
+                    ignore = '(\\.|:)+',
+                    strip_accents = 0,
+                    lower = 1
+                )
+            """)
+            console.print("[green]DuckDB FTS index created[/green]")
+        except Exception as e:
+            # FTS index might already exist or extension not available
+            if "already exists" not in str(e).lower():
+                console.print(f"[yellow]FTS setup note: {e}[/yellow]")
 
     async def index(self, data: list[dict]) -> int:
         """
@@ -278,6 +309,100 @@ class LeanTypeIndex(Indexer):
         """, (f"%{query}%", f"%{query}%", f"%{query}%", limit)).fetchall()
 
         return [self._row_to_result(row, score=0.85) for row in rows]
+
+    async def query_bm25(
+        self,
+        query: str,
+        limit: int = 10,
+    ) -> list[RetrievalResult]:
+        """
+        BM25 full-text search query (Level 2 in cascade).
+
+        Uses DuckDB FTS extension for keyword/BM25-style matching.
+        Faster than semantic search for exact keyword matches.
+
+        Args:
+            query: Search query (keywords)
+            limit: Maximum results
+
+        Returns:
+            List of matching declarations ranked by BM25 score
+        """
+        conn = self._get_conn()
+
+        try:
+            # Load FTS extension if not already loaded
+            conn.execute("LOAD fts")
+
+            # Use FTS match function for BM25-style ranking
+            rows = conn.execute(f"""
+                SELECT name, full_name, type_signature, namespace, file_path,
+                       line_start, line_end, doc_string, proof_preview, decl_type,
+                       fts_main_{self.TABLE_NAME}.match_bm25(id, ?) AS score
+                FROM {self.TABLE_NAME}
+                WHERE score IS NOT NULL
+                ORDER BY score DESC
+                LIMIT ?
+            """, (query, limit)).fetchall()
+
+            return [
+                self._row_to_result(row[:10], score=float(row[10]) if row[10] else 0.5)
+                for row in rows
+            ]
+        except Exception as e:
+            # Fallback to LIKE-based search if FTS fails
+            console.print(f"[yellow]FTS query fallback: {e}[/yellow]")
+            return await self._query_bm25_fallback(query, limit)
+
+    async def _query_bm25_fallback(
+        self,
+        query: str,
+        limit: int = 10,
+    ) -> list[RetrievalResult]:
+        """Fallback BM25-like search using LIKE patterns."""
+        conn = self._get_conn()
+
+        # Split query into terms and search each
+        terms = query.lower().split()
+        if not terms:
+            return []
+
+        # Build WHERE clause for OR matching
+        conditions = []
+        params = []
+        for term in terms:
+            conditions.append(
+                "(LOWER(name) LIKE ? OR LOWER(full_name) LIKE ? OR "
+                "LOWER(type_signature) LIKE ? OR LOWER(doc_string) LIKE ? OR "
+                "LOWER(proof_preview) LIKE ?)"
+            )
+            pattern = f"%{term}%"
+            params.extend([pattern] * 5)
+
+        where_clause = " OR ".join(conditions)
+        params.append(limit)
+
+        rows = conn.execute(f"""
+            SELECT name, full_name, type_signature, namespace, file_path,
+                   line_start, line_end, doc_string, proof_preview, decl_type
+            FROM {self.TABLE_NAME}
+            WHERE {where_clause}
+            LIMIT ?
+        """, params).fetchall()
+
+        # Score based on number of term matches
+        results = []
+        for row in rows:
+            text = f"{row[0]} {row[1]} {row[2]} {row[7] or ''} {row[8] or ''}".lower()
+            matches = sum(1 for term in terms if term in text)
+            score = matches / len(terms) * 0.8  # Max 0.8 for fallback
+            result = self._row_to_result(row, score=score)
+            result.level = RetrievalLevel.BM25
+            results.append(result)
+
+        # Sort by score descending
+        results.sort(key=lambda r: r.score, reverse=True)
+        return results
 
     def _row_to_result(
         self,

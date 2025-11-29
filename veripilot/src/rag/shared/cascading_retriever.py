@@ -3,8 +3,8 @@ Cascading retrieval across multiple backends.
 
 Implements the four-level cascade:
 1. Type Index (DuckDB) - <100ms
-2. BM25 Keyword (Weaviate) - <500ms
-3. Semantic Embeddings (Weaviate) - <2s
+2. BM25 Keyword (DuckDB FTS) - <500ms
+3. Semantic Embeddings (Qdrant) - <2s
 4. Graph Traversal (Neo4j) - <5s
 """
 from __future__ import annotations
@@ -36,16 +36,17 @@ class CascadingRetriever(RAGProvider):
     def __init__(
         self,
         type_index=None,
-        weaviate_client=None,
+        qdrant_client=None,
         neo4j_graph=None,
         embedder=None,
         config: Optional[dict] = None,
     ):
         self._type_index = type_index
-        self._weaviate = weaviate_client
+        self._qdrant = qdrant_client
         self._neo4j = neo4j_graph
         self._embedder = embedder
         self._config = config or {}
+        self._collection_name = config.get("collection_name", "lean_proofs") if config else "lean_proofs"
 
         # Timeout configuration (in seconds)
         self._timeouts = {
@@ -90,8 +91,8 @@ class CascadingRetriever(RAGProvider):
         if len(results) >= query.top_k:
             return self._rank_and_limit(results, query.top_k)
 
-        # Level 2: BM25 Keyword (Weaviate) - <500ms
-        if RetrievalLevel.BM25 in query.include_levels and self._weaviate:
+        # Level 2: BM25 Keyword (DuckDB FTS) - <500ms
+        if RetrievalLevel.BM25 in query.include_levels and self._type_index:
             try:
                 bm25_results = await asyncio.wait_for(
                     self._query_bm25(query.text),
@@ -104,8 +105,8 @@ class CascadingRetriever(RAGProvider):
             except asyncio.TimeoutError:
                 pass
 
-        # Level 3: Semantic Embeddings (Weaviate) - <2s
-        if RetrievalLevel.SEMANTIC in query.include_levels and self._weaviate and self._embedder:
+        # Level 3: Semantic Embeddings (Qdrant) - <2s
+        if RetrievalLevel.SEMANTIC in query.include_levels and self._qdrant and self._embedder:
             try:
                 semantic_results = await asyncio.wait_for(
                     self._query_semantic(query.text),
@@ -161,8 +162,8 @@ class CascadingRetriever(RAGProvider):
             self._type_index.close()
         if self._neo4j:
             self._neo4j.close()
-        if self._weaviate:
-            self._weaviate.close()
+        if self._qdrant:
+            self._qdrant.close()
 
     # Private query methods
 
@@ -171,59 +172,42 @@ class CascadingRetriever(RAGProvider):
         return await self._type_index.query(query, limit=10)
 
     async def _query_bm25(self, query: str) -> list[RetrievalResult]:
-        """Query Weaviate BM25."""
-        collection = self._weaviate.collections.get("LeanProofs")
-
-        response = collection.query.bm25(
-            query=query,
-            limit=10,
-            return_properties=["declaration_name", "full_name", "type_signature",
-                              "namespace", "file_path", "doc_string"],
-        )
-
-        results = []
-        for obj in response.objects:
-            results.append(RetrievalResult(
-                name=obj.properties.get("declaration_name", ""),
-                full_name=obj.properties.get("full_name", ""),
-                type_signature=obj.properties.get("type_signature", ""),
-                namespace=obj.properties.get("namespace", ""),
-                file_path=obj.properties.get("file_path", ""),
-                doc_string=obj.properties.get("doc_string"),
-                score=0.9,
-                level=RetrievalLevel.BM25,
-            ))
-
+        """Query DuckDB FTS for BM25-style keyword search."""
+        # Use the type_index's BM25 method (DuckDB FTS)
+        results = await self._type_index.query_bm25(query, limit=10)
+        # Ensure level is set correctly
+        for r in results:
+            r.level = RetrievalLevel.BM25
         return results
 
     async def _query_semantic(self, query: str) -> list[RetrievalResult]:
-        """Query Weaviate with semantic embeddings."""
+        """Query Qdrant with semantic embeddings."""
+        from qdrant_client.models import Filter
+
         # Compute query embedding
         query_embedding = await self._embedder.embed_query(query)
 
-        collection = self._weaviate.collections.get("LeanProofs")
-
-        response = collection.query.near_vector(
-            near_vector=query_embedding,
+        # Search in Qdrant
+        search_results = self._qdrant.search(
+            collection_name=self._collection_name,
+            query_vector=query_embedding,
             limit=10,
-            return_properties=["declaration_name", "full_name", "type_signature",
-                              "namespace", "file_path", "doc_string", "proof_preview"],
+            with_payload=True,
         )
 
         results = []
-        for obj in response.objects:
-            # Calculate score from distance
-            distance = getattr(obj.metadata, "distance", 0.5)
-            score = 1 - distance
+        for hit in search_results:
+            payload = hit.payload or {}
+            score = hit.score  # Qdrant returns similarity score directly
 
             results.append(RetrievalResult(
-                name=obj.properties.get("declaration_name", ""),
-                full_name=obj.properties.get("full_name", ""),
-                type_signature=obj.properties.get("type_signature", ""),
-                namespace=obj.properties.get("namespace", ""),
-                file_path=obj.properties.get("file_path", ""),
-                doc_string=obj.properties.get("doc_string"),
-                proof=obj.properties.get("proof_preview"),
+                name=payload.get("declaration_name", ""),
+                full_name=payload.get("full_name", ""),
+                type_signature=payload.get("type_signature", ""),
+                namespace=payload.get("namespace", ""),
+                file_path=payload.get("file_path", ""),
+                doc_string=payload.get("doc_string"),
+                proof=payload.get("proof_preview"),
                 score=score,
                 level=RetrievalLevel.SEMANTIC,
             ))

@@ -3,6 +3,11 @@ LlamaIndex integration for Lean RAG.
 
 Provides a LlamaIndex-compatible retriever that uses our
 cascading retrieval system under the hood.
+
+Backend stack:
+- DuckDB: Type index (L1) + BM25/FTS (L2)
+- Qdrant: Semantic search (L3)
+- Neo4j: Graph traversal (L4)
 """
 from __future__ import annotations
 
@@ -21,7 +26,7 @@ class LeanRAG:
     Main Lean RAG interface for VeriPilot.
 
     Provides a unified interface for:
-    - Initializing all backends (DuckDB, Weaviate, Neo4j)
+    - Initializing all backends (DuckDB, Qdrant, Neo4j)
     - Running cascading retrieval queries
     - LlamaIndex integration
     """
@@ -35,7 +40,7 @@ class LeanRAG:
         """
         self._config = self._load_config(config_path)
         self._type_index = None
-        self._weaviate = None
+        self._qdrant = None
         self._neo4j = None
         self._embedder = None
         self._retriever = None
@@ -79,22 +84,25 @@ class LeanRAG:
         except Exception as e:
             console.print(f"[yellow]  Embeddings init failed: {e}[/yellow]")
 
-        # Initialize Weaviate
+        # Initialize Qdrant
         try:
-            import weaviate
-            url = os.getenv("WEAVIATE_URL")
-            api_key = os.getenv("WEAVIATE_API_KEY")
+            from qdrant_client import QdrantClient
+
+            url = os.getenv("QDRANT_URL")
+            api_key = os.getenv("QDRANT_API_KEY")
 
             if url and api_key:
-                self._weaviate = weaviate.connect_to_weaviate_cloud(
-                    cluster_url=url,
-                    auth_credentials=weaviate.auth.AuthApiKey(api_key),
+                self._qdrant = QdrantClient(
+                    url=url,
+                    api_key=api_key,
                 )
-                console.print("[green]  Weaviate: connected[/green]")
+                # Check connection by listing collections
+                collections = self._qdrant.get_collections()
+                console.print(f"[green]  Qdrant: connected ({len(collections.collections)} collections)[/green]")
             else:
-                console.print("[yellow]  Weaviate: credentials not set[/yellow]")
+                console.print("[yellow]  Qdrant: credentials not set[/yellow]")
         except Exception as e:
-            console.print(f"[yellow]  Weaviate init failed: {e}[/yellow]")
+            console.print(f"[yellow]  Qdrant init failed: {e}[/yellow]")
 
         # Initialize Neo4j
         try:
@@ -113,7 +121,7 @@ class LeanRAG:
         from rag.shared.cascading_retriever import CascadingRetriever
         self._retriever = CascadingRetriever(
             type_index=self._type_index,
-            weaviate_client=self._weaviate,
+            qdrant_client=self._qdrant,
             neo4j_graph=self._neo4j,
             embedder=self._embedder,
             config=self._config,

@@ -23,14 +23,15 @@ databases:
     path: "${DUCKDB_PATH}"
     # Table name for declarations
     table: "lean_declarations"
+    # Full-text search for BM25 (Level 2)
+    fts_enabled: true
 
-  weaviate:
-    url: "${WEAVIATE_URL}"
-    api_key: "${WEAVIATE_API_KEY}"
-    collections:
-      proofs: "LeanProofs"
-      tactics: "LeanTactics"
-      goals: "LeanGoals"  # For intermediate proof states
+  qdrant:
+    url: "${QDRANT_URL}"
+    api_key: "${QDRANT_API_KEY}"
+    collection_name: "lean_proofs"
+    # Vector dimension must match embedding model
+    vector_size: 384
 
   neo4j:
     uri: "${NEO4J_URI}"
@@ -54,17 +55,17 @@ retrieval:
       description: "Exact name and signature matching"
 
     - name: "bm25"
-      backend: "weaviate"
+      backend: "duckdb_fts"
       timeout_ms: 500
       priority: 2
-      description: "Keyword-based BM25 search"
+      description: "DuckDB full-text search (BM25-style)"
 
     - name: "semantic"
-      backend: "weaviate"
+      backend: "qdrant"
       timeout_ms: 2000
       priority: 3
       top_k: 10
-      description: "Embedding similarity search"
+      description: "Qdrant embedding similarity search"
 
     - name: "graph"
       backend: "neo4j"
