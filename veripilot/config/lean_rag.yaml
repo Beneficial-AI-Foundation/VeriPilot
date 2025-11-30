@@ -18,11 +18,12 @@ corpus:
       exclude: [".lake/**", "Archive/**", "Counterexamples/**"]
       # Sparse checkout folders (for lightweight extraction)
       sparse_checkout:
-        - "Mathlib/Tactic/**"          # Tactics - essential for proof automation
-        - "Mathlib/Algebra/**"          # Algebra foundations
-        - "Mathlib/LinearAlgebra/**"    # Linear algebra
-        - "Mathlib/AlgebraicGeometry/**" # Algebraic geometry
-        - "Mathlib/Data/**"             # Core data structures (List, Array, Nat, etc.)
+        - "Mathlib/Tactic/**"                      # Tactics - essential for proof automation
+        - "Mathlib/Algebra/Group/**"               # Group theory
+        - "Mathlib/Algebra/Ring/**"                # Ring theory
+        - "Mathlib/Algebra/Field/**"               # Field theory
+        - "Mathlib/LinearAlgebra/**"               # Linear algebra
+        - "Mathlib/AlgebraicGeometry/EllipticCurve/**"  # Elliptic curves
       priority: 1
       description: "Core math library - 50K+ lemmas (selective folders)"
 
@@ -34,17 +35,17 @@ corpus:
       priority: 1
       description: "Lean 4 standard library (Batteries)"
 
-    # Priority 2: Books (PDFs)
+    # Priority 2: Books (PDFs) - Local files (user will upload)
     - name: "tpil4"
       type: "pdf"
-      url: "https://lean-lang.org/theorem_proving_in_lean4/theorem_proving_in_lean4.pdf"
+      url: ""  # Local file - user uploads to data/sources/pdfs/tpil4.pdf
       path: "data/sources/pdfs/tpil4.pdf"
       priority: 1
       description: "Theorem Proving in Lean 4 - 194 pages"
 
     - name: "metaprogramming"
       type: "pdf"
-      url: "https://leanprover-community.github.io/lean4-metaprogramming-book/print.pdf"
+      url: ""  # Local file - user uploads to data/sources/pdfs/metaprogramming.pdf
       path: "data/sources/pdfs/metaprogramming.pdf"
       priority: 1
       description: "Metaprogramming in Lean 4 - tactic development"

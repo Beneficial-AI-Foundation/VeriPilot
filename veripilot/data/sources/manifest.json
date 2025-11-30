@@ -1,0 +1,31 @@
+{
+  "sources": [
+    {
+      "name": "mathlib4",
+      "type": "git",
+      "path": "data/sources/mathlib4",
+      "success": true
+    },
+    {
+      "name": "lean4-stdlib",
+      "type": "git",
+      "path": "data/sources/lean4",
+      "success": true
+    },
+    {
+      "name": "tpil4",
+      "type": "pdf",
+      "path": "data/sources/pdfs/tpil4.pdf",
+      "success": true
+    },
+    {
+      "name": "metaprogramming",
+      "type": "pdf",
+      "path": "data/sources/pdfs/metaprogramming.pdf",
+      "success": true
+    }
+  ],
+  "total": 4,
+  "successful": 4,
+  "failed": 0
+}

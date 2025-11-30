@@ -164,6 +164,16 @@ def download_pdf(source: dict, force: bool = False) -> bool:
     url = source["url"]
     path = Path(source["path"])
 
+    # Skip if URL is empty (local file)
+    if not url or not url.strip():
+        if path.exists():
+            console.print(f"[green]Local file {name} found at {path}[/green]")
+            return True
+        else:
+            console.print(f"[yellow]Skipping {name} (local file expected at {path}, not found)[/yellow]")
+            console.print(f"[yellow]Please upload your PDF to: {path}[/yellow]")
+            return False
+
     if path.exists() and not force:
         console.print(f"[yellow]Skipping {name} (already exists at {path})[/yellow]")
         return True

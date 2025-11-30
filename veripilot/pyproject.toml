@@ -12,6 +12,7 @@ authors = [
 dependencies = [
     # Lean Extraction
     "lean-dojo>=2.0.0",
+    "pymupdf>=1.23.0",  # PDF extraction
 
     # RAG Framework
     "llama-index>=0.10.0",

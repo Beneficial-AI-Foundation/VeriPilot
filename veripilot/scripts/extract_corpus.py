@@ -1,128 +1,365 @@
 #!/usr/bin/env python3
 """
-Extract Lean corpus using LeanDojo.
+Extract Lean corpus from multiple sources (git repos + PDFs).
 
-This script extracts theorem data from the dalek-verify-lean submodule
-using LeanDojo's compiler-level extraction.
+Orchestrates:
+- Lightweight regex extraction for large/sparse repos (mathlib4)
+- LeanDojo extraction for small complete repos (sphere-eversion, etc.)
+- PDF code block extraction for books (TPIL4, Metaprogramming)
 
 Usage:
-    python scripts/extract_corpus.py [--output OUTPUT] [--config CONFIG]
+    python scripts/extract_corpus.py [--priority N] [--mode MODE] [--config FILE]
 
-Example:
-    python scripts/extract_corpus.py --output data/extracted/lean_corpus.json
+Examples:
+    python scripts/extract_corpus.py --priority 1 --mode auto
+    python scripts/extract_corpus.py --mode lightweight  # Force lightweight only
 """
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
+from collections import Counter
 
-# Add src to path for imports
+# Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+import yaml
 from dotenv import load_dotenv
 from rich.console import Console
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn
 
 console = Console()
 
 
+def load_config(config_path: Path) -> dict:
+    """Load configuration from YAML file."""
+    with open(config_path) as f:
+        return yaml.safe_load(f)
+
+
+def save_json(data: list, output_path: Path):
+    """Save data to JSON file."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, 'w') as f:
+        json.dump(data, f, indent=2)
+    console.print(f"[green]Saved {len(data)} entities to {output_path}[/green]")
+
+
+def merge_corpora(lightweight: list, leandojo: list, pdf: list) -> list:
+    """
+    Merge and deduplicate corpora from different sources.
+
+    Deduplication strategy: Prefer LeanDojo over lightweight for same full_name.
+    """
+    # Create combined list
+    combined = []
+
+    # Track seen full_names
+    seen = set()
+
+    # Add LeanDojo first (higher priority)
+    for entity in leandojo:
+        full_name = entity.get('full_name', '')
+        if full_name and full_name not in seen:
+            combined.append(entity)
+            seen.add(full_name)
+
+    # Add lightweight (skip if already in LeanDojo)
+    for entity in lightweight:
+        full_name = entity.get('full_name', '')
+        if full_name and full_name not in seen:
+            combined.append(entity)
+            seen.add(full_name)
+
+    # Add PDF blocks (no deduplication - different nature)
+    combined.extend(pdf)
+
+    return combined
+
+
+def is_buildable(repo_path: Path) -> bool:
+    """Check if a Lean repository is buildable (has lakefile.lean)."""
+    return (repo_path / "lakefile.lean").exists() or (repo_path / "lakefile.toml").exists()
+
+
+def extract_git_source_lightweight(source: dict, pattern: str) -> list:
+    """
+    Extract from git repo using lightweight regex parser.
+
+    Args:
+        source: Source config dict
+        pattern: Glob pattern for .lean files
+
+    Returns:
+        List of declaration dicts
+    """
+    from rag.lean.lightweight_extractor import LightweightLeanParser
+
+    repo_path = Path(source['path'])
+    console.print(f"[blue]Using lightweight extractor for {source['name']}...[/blue]")
+
+    parser = LightweightLeanParser()
+    declarations = parser.parse_directory(repo_path, pattern=pattern)
+
+    # Convert to unified schema
+    result = []
+    for decl in declarations:
+        entity = decl.to_dict()
+        entity['corpus_source'] = source['name']
+        entity['extraction_mode'] = 'lightweight'
+        entity['type'] = decl.decl_type  # Ensure type field exists
+        result.append(entity)
+
+    return result
+
+
+def extract_git_source_leandojo(source: dict, cache_dir: str, num_procs: int) -> list:
+    """
+    Extract from git repo using LeanDojo (full compiler-level extraction).
+
+    Args:
+        source: Source config dict
+        cache_dir: LeanDojo cache directory
+        num_procs: Number of parallel processes
+
+    Returns:
+        List of theorem dicts
+    """
+    from rag.lean.extractor import LeanDojoExtractor
+
+    repo_path = Path(source['path'])
+    console.print(f"[blue]Using LeanDojo extractor for {source['name']}...[/blue]")
+
+    extractor = LeanDojoExtractor(cache_dir=cache_dir, num_procs=num_procs)
+
+    try:
+        extraction_result = extractor.extract_local_repo(
+            repo_path=repo_path,
+            corpus_name=source['name'],
+        )
+
+        # Flatten file structure and convert to unified schema
+        result = []
+        for file_data in extraction_result.files:
+            for theorem in file_data.theorems:
+                entity = theorem.to_dict()
+                entity['corpus_source'] = source['name']
+                entity['extraction_mode'] = 'lean_dojo'
+                entity['type'] = 'theorem'  # LeanDojo extracts theorems/lemmas
+                entity['namespace'] = ''  # LeanDojo doesn't track namespaces separately
+                entity['proof_preview'] = theorem.proof[:100] if theorem.proof else ''
+                result.append(entity)
+
+        return result
+
+    except Exception as e:
+        console.print(f"[red]LeanDojo extraction failed for {source['name']}: {e}[/red]")
+        console.print("[yellow]Falling back to lightweight extractor...[/yellow]")
+        # Fallback to lightweight
+        pattern = source.get('patterns', ['**/*.lean'])[0]
+        return extract_git_source_lightweight(source, pattern)
+
+
+def extract_pdf_source(source: dict) -> list:
+    """
+    Extract code blocks from PDF.
+
+    Args:
+        source: Source config dict
+
+    Returns:
+        List of PDF code block dicts
+    """
+    from rag.lean.pdf_extractor import extract_pdf
+
+    pdf_path = Path(source['path'])
+    console.print(f"[blue]Extracting code from {source['name']}...[/blue]")
+
+    try:
+        blocks = extract_pdf(pdf_path, context_chars=200)
+
+        # Convert to unified schema
+        result = []
+        for block in blocks:
+            entity = block.to_dict()
+            entity['corpus_source'] = source['name']
+            entity['extraction_mode'] = 'pdf'
+            result.append(entity)
+
+        return result
+
+    except Exception as e:
+        console.print(f"[red]PDF extraction failed for {source['name']}: {e}[/red]")
+        return []
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Extract Lean corpus using LeanDojo"
+        description="Extract Lean corpus from multiple sources"
     )
     parser.add_argument(
-        "--repo",
-        default="../lean-projects/dalek-verify-lean",
-        help="Path to Lean repository (relative to veripilot/)",
+        "--priority",
+        type=int,
+        default=None,
+        help="Only extract sources with this priority (1, 2, or 3)"
     )
     parser.add_argument(
-        "--output",
-        default="data/extracted/lean_corpus.json",
-        help="Output JSON file path",
+        "--mode",
+        choices=["auto", "lightweight", "lean_dojo"],
+        default="auto",
+        help="Extraction mode: auto (decide per source), lightweight (regex only), lean_dojo (force LeanDojo)"
     )
     parser.add_argument(
-        "--name",
-        default="dalek-verify-lean",
-        help="Corpus name",
+        "--config",
+        default="config/lean_rag.yaml",
+        help="Path to config file (default: config/lean_rag.yaml)"
+    )
+    parser.add_argument(
+        "--output-dir",
+        default="data/extracted",
+        help="Output directory (default: data/extracted)"
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-extract even if output files exist"
     )
     parser.add_argument(
         "--num-procs",
         type=int,
         default=4,
-        help="Number of parallel processes",
+        help="Number of parallel processes for LeanDojo (default: 4)"
     )
     args = parser.parse_args()
 
-    # Load environment variables
+    # Load environment
     load_dotenv()
 
-    # Resolve paths
+    # Paths
     script_dir = Path(__file__).parent
     veripilot_dir = script_dir.parent
-    repo_path = (veripilot_dir / args.repo).resolve()
-    output_path = (veripilot_dir / args.output).resolve()
+    config_path = veripilot_dir / args.config
+    output_dir = veripilot_dir / args.output_dir
 
-    console.print("[bold blue]VeriPilot Lean Corpus Extraction[/bold blue]")
-    console.print(f"Repository: {repo_path}")
-    console.print(f"Output: {output_path}")
+    if not config_path.exists():
+        console.print(f"[red]Config file not found: {config_path}[/red]")
+        return 1
+
+    # Load config
+    config = load_config(config_path)
+    sources = config['corpus']['sources']
+
+    # Filter by priority
+    if args.priority is not None:
+        sources = [s for s in sources if s.get('priority') == args.priority]
+        console.print(f"[blue]Extracting Priority {args.priority} sources only ({len(sources)} sources)[/blue]")
+    else:
+        console.print(f"[blue]Extracting all sources ({len(sources)} sources)[/blue]")
+
+    if not sources:
+        console.print("[yellow]No sources to extract[/yellow]")
+        return 0
+
     console.print()
 
-    # Check if repo exists
-    if not repo_path.exists():
-        console.print(f"[red]Error: Repository not found at {repo_path}[/red]")
-        console.print("[yellow]Make sure the dalek-verify-lean submodule is initialized:[/yellow]")
-        console.print("  git submodule update --init --recursive")
-        sys.exit(1)
+    # LeanDojo cache dir
+    cache_dir = os.getenv("LEAN_DOJO_CACHE_DIR", str(veripilot_dir / "data" / "lean_dojo_cache"))
 
-    # Check if output already exists
-    if output_path.exists():
-        console.print(f"[yellow]Output file already exists: {output_path}[/yellow]")
-        response = input("Overwrite? [y/N] ").strip().lower()
-        if response != "y":
-            console.print("[blue]Aborted.[/blue]")
-            sys.exit(0)
+    # Extract from each source
+    lean_lightweight = []
+    lean_leandojo = []
+    pdf_blocks = []
 
-    # Import extractor
-    try:
-        from rag.lean.extractor import LeanDojoExtractor
-    except ImportError as e:
-        console.print(f"[red]Import error: {e}[/red]")
-        console.print("[yellow]Make sure you've installed dependencies:[/yellow]")
-        console.print("  pip install -e .")
-        sys.exit(1)
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Extracting sources...", total=len(sources))
 
-    # Create extractor
-    cache_dir = os.getenv("LEAN_DOJO_CACHE_DIR", "/workspace/data/lean_dojo_cache")
-    extractor = LeanDojoExtractor(
-        cache_dir=cache_dir,
-        num_procs=args.num_procs,
-    )
+        for source in sources:
+            progress.update(task, description=f"Processing {source['name']}...")
 
-    # Run extraction
-    try:
-        result = extractor.extract_local_repo(
-            repo_path=repo_path,
-            corpus_name=args.name,
-        )
+            if source['type'] == 'git':
+                repo_path = Path(source['path'])
 
-        # Save result
-        result.save(output_path)
+                if not repo_path.exists():
+                    console.print(f"[yellow]Skipping {source['name']} (not downloaded)[/yellow]")
+                    progress.advance(task)
+                    continue
 
-        # Print summary
+                # Decide extraction mode
+                use_lightweight = False
+
+                if args.mode == 'lightweight':
+                    use_lightweight = True
+                elif args.mode == 'lean_dojo':
+                    use_lightweight = False
+                else:  # auto mode
+                    # Use lightweight if sparse_checkout specified
+                    if source.get('sparse_checkout'):
+                        use_lightweight = True
+                    else:
+                        # Try LeanDojo if buildable, else lightweight
+                        use_lightweight = not is_buildable(repo_path)
+
+                # Extract
+                pattern = source.get('patterns', ['**/*.lean'])[0]
+
+                if use_lightweight:
+                    entities = extract_git_source_lightweight(source, pattern)
+                    lean_lightweight.extend(entities)
+                else:
+                    entities = extract_git_source_leandojo(source, cache_dir, args.num_procs)
+                    lean_leandojo.extend(entities)
+
+            elif source['type'] == 'pdf':
+                pdf_path = Path(source['path'])
+
+                if not pdf_path.exists():
+                    console.print(f"[yellow]Skipping {source['name']} (not downloaded)[/yellow]")
+                    progress.advance(task)
+                    continue
+
+                entities = extract_pdf_source(source)
+                pdf_blocks.extend(entities)
+
+            else:
+                console.print(f"[yellow]Unknown source type: {source['type']}[/yellow]")
+
+            progress.advance(task)
+
+    # Save separate outputs
+    console.print()
+    save_json(lean_lightweight, output_dir / "lean_lightweight.json")
+    save_json(lean_leandojo, output_dir / "lean_leandojo.json")
+    save_json(pdf_blocks, output_dir / "pdf_corpus.json")
+
+    # Combine and deduplicate
+    combined = merge_corpora(lean_lightweight, lean_leandojo, pdf_blocks)
+    save_json(combined, output_dir / "combined_corpus.json")
+
+    # Print summary
+    console.print()
+    console.print("[bold green]Extraction Complete[/bold green]")
+    console.print(f"  Lightweight: {len(lean_lightweight)} declarations")
+    console.print(f"  LeanDojo: {len(lean_leandojo)} theorems")
+    console.print(f"  PDF blocks: {len(pdf_blocks)} code blocks")
+    console.print(f"  Combined: {len(combined)} total entities")
+
+    # Type breakdown
+    if combined:
+        type_counts = Counter(e.get('type', 'unknown') for e in combined)
         console.print()
-        console.print("[bold green]Extraction Summary[/bold green]")
-        console.print(f"  Corpus: {result.corpus_name}")
-        console.print(f"  Commit: {result.commit}")
-        console.print(f"  Files: {len(result.files)}")
-        console.print(f"  Theorems: {result.total_theorems}")
-        console.print(f"  Tactic steps: {result.total_tactics}")
-        console.print(f"  Output: {output_path}")
+        console.print("[bold]Type breakdown:[/bold]")
+        for typ, count in type_counts.most_common():
+            console.print(f"  {typ}: {count}")
 
-    except Exception as e:
-        console.print(f"[red]Extraction failed: {e}[/red]")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
