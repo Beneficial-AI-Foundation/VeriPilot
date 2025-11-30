@@ -14,18 +14,30 @@
     },
     {
       "name": "tpil4",
-      "type": "pdf",
-      "path": "data/sources/pdfs/tpil4.pdf",
+      "type": "book",
+      "path": "data/sources/books/tpil4",
       "success": true
     },
     {
-      "name": "metaprogramming",
-      "type": "pdf",
-      "path": "data/sources/pdfs/metaprogramming.pdf",
+      "name": "fp-lean",
+      "type": "book",
+      "path": "data/sources/books/fp-lean",
+      "success": true
+    },
+    {
+      "name": "mil",
+      "type": "book",
+      "path": "data/sources/books/mil",
+      "success": true
+    },
+    {
+      "name": "metaprogramming-book",
+      "type": "book",
+      "path": "data/sources/books/metaprogramming-book",
       "success": true
     }
   ],
-  "total": 4,
-  "successful": 4,
+  "total": 6,
+  "successful": 6,
   "failed": 0
 }

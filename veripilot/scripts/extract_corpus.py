@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Extract Lean corpus from multiple sources (git repos + PDFs).
+Extract Lean corpus from multiple sources (git repos + PDFs + books).
 
 Orchestrates:
 - Lightweight regex extraction for large/sparse repos (mathlib4)
 - LeanDojo extraction for small complete repos (sphere-eversion, etc.)
-- PDF code block extraction for books (TPIL4, Metaprogramming)
+- Book extraction for Lean 4 tutorial repositories (Verso + traditional formats)
+- PDF code block extraction for reference documents
 
 Usage:
     python scripts/extract_corpus.py [--priority N] [--mode MODE] [--config FILE]
@@ -46,11 +47,12 @@ def save_json(data: list, output_path: Path):
     console.print(f"[green]Saved {len(data)} entities to {output_path}[/green]")
 
 
-def merge_corpora(lightweight: list, leandojo: list, pdf: list) -> list:
+def merge_corpora(lightweight: list, leandojo: list, book: list, pdf: list) -> list:
     """
     Merge and deduplicate corpora from different sources.
 
     Deduplication strategy: Prefer LeanDojo over lightweight for same full_name.
+    Books and PDFs are not deduplicated (different nature - educational content).
     """
     # Create combined list
     combined = []
@@ -71,6 +73,9 @@ def merge_corpora(lightweight: list, leandojo: list, pdf: list) -> list:
         if full_name and full_name not in seen:
             combined.append(entity)
             seen.add(full_name)
+
+    # Add book content (no deduplication - educational examples)
+    combined.extend(book)
 
     # Add PDF blocks (no deduplication - different nature)
     combined.extend(pdf)
@@ -159,6 +164,49 @@ def extract_git_source_leandojo(source: dict, cache_dir: str, num_procs: int) ->
         # Fallback to lightweight
         pattern = source.get('patterns', ['**/*.lean'])[0]
         return extract_git_source_lightweight(source, pattern)
+
+
+def extract_book_source(source: dict) -> list:
+    """
+    Extract educational content from a Lean 4 book repository.
+
+    Args:
+        source: Source config dict with book-specific fields:
+            - name: Book identifier
+            - path: Local repo path
+            - content_path: Relative path to content within repo
+            - format: "verso", "traditional", or "auto"
+
+    Returns:
+        List of book declaration dicts
+    """
+    from rag.lean.book_extractor import BookExtractor
+
+    repo_path = Path(source['path'])
+    console.print(f"[blue]Extracting book content from {source['name']}...[/blue]")
+    console.print(f"[blue]  Format: {source.get('format', 'auto')}, Content: {source.get('content_path', '(root)')}[/blue]")
+
+    try:
+        extractor = BookExtractor()
+        declarations = extractor.extract_book(repo_path, source)
+
+        # Convert to unified schema
+        result = []
+        for decl in declarations:
+            entity = decl.to_dict()
+            # Ensure required fields exist
+            entity['corpus_source'] = source['name']
+            entity['extraction_mode'] = 'book'
+            entity['type'] = decl.decl_type
+            result.append(entity)
+
+        return result
+
+    except Exception as e:
+        console.print(f"[red]Book extraction failed for {source['name']}: {e}[/red]")
+        import traceback
+        traceback.print_exc()
+        return []
 
 
 def extract_pdf_source(source: dict) -> list:
@@ -263,13 +311,45 @@ def main():
 
     console.print()
 
+    # Check if output files exist (and load for incremental extraction)
+    combined_path = output_dir / "combined_corpus.json"
+    lightweight_path = output_dir / "lean_lightweight.json"
+    leandojo_path = output_dir / "lean_leandojo.json"
+    book_path = output_dir / "book_corpus.json"
+    pdf_path = output_dir / "pdf_corpus.json"
+
+    if combined_path.exists() and not args.force:
+        console.print(f"[yellow]Output already exists at {combined_path}[/yellow]")
+        console.print("[blue]Loading existing extractions for incremental update...[/blue]")
+
+        # Load existing extractions
+        lean_lightweight = json.load(open(lightweight_path)) if lightweight_path.exists() else []
+        lean_leandojo = json.load(open(leandojo_path)) if leandojo_path.exists() else []
+        book_entities = json.load(open(book_path)) if book_path.exists() else []
+        pdf_blocks = json.load(open(pdf_path)) if pdf_path.exists() else []
+
+        # Track which sources we already have
+        existing_sources = set()
+        for entity in lean_lightweight + lean_leandojo + book_entities + pdf_blocks:
+            existing_sources.add(entity.get('corpus_source', ''))
+
+        # Filter to only new sources
+        sources = [s for s in sources if s['name'] not in existing_sources]
+
+        if not sources:
+            console.print("[green]All sources already extracted. Use --force to re-extract.[/green]")
+            return 0
+
+        console.print(f"[blue]Extracting {len(sources)} new sources only[/blue]")
+    else:
+        # Fresh extraction
+        lean_lightweight = []
+        lean_leandojo = []
+        book_entities = []
+        pdf_blocks = []
+
     # LeanDojo cache dir
     cache_dir = os.getenv("LEAN_DOJO_CACHE_DIR", str(veripilot_dir / "data" / "lean_dojo_cache"))
-
-    # Extract from each source
-    lean_lightweight = []
-    lean_leandojo = []
-    pdf_blocks = []
 
     with Progress(
         SpinnerColumn(),
@@ -316,6 +396,17 @@ def main():
                     entities = extract_git_source_leandojo(source, cache_dir, args.num_procs)
                     lean_leandojo.extend(entities)
 
+            elif source['type'] == 'book':
+                repo_path = Path(source['path'])
+
+                if not repo_path.exists():
+                    console.print(f"[yellow]Skipping {source['name']} (not downloaded)[/yellow]")
+                    progress.advance(task)
+                    continue
+
+                entities = extract_book_source(source)
+                book_entities.extend(entities)
+
             elif source['type'] == 'pdf':
                 pdf_path = Path(source['path'])
 
@@ -336,10 +427,11 @@ def main():
     console.print()
     save_json(lean_lightweight, output_dir / "lean_lightweight.json")
     save_json(lean_leandojo, output_dir / "lean_leandojo.json")
+    save_json(book_entities, output_dir / "book_corpus.json")
     save_json(pdf_blocks, output_dir / "pdf_corpus.json")
 
     # Combine and deduplicate
-    combined = merge_corpora(lean_lightweight, lean_leandojo, pdf_blocks)
+    combined = merge_corpora(lean_lightweight, lean_leandojo, book_entities, pdf_blocks)
     save_json(combined, output_dir / "combined_corpus.json")
 
     # Print summary
@@ -347,6 +439,7 @@ def main():
     console.print("[bold green]Extraction Complete[/bold green]")
     console.print(f"  Lightweight: {len(lean_lightweight)} declarations")
     console.print(f"  LeanDojo: {len(lean_leandojo)} theorems")
+    console.print(f"  Books: {len(book_entities)} examples")
     console.print(f"  PDF blocks: {len(pdf_blocks)} code blocks")
     console.print(f"  Combined: {len(combined)} total entities")
 

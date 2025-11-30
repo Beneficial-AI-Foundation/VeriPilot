@@ -4,6 +4,7 @@ Download corpus sources from config/lean_rag.yaml.
 
 Supports:
 - Git repositories (with sparse checkout for large repos)
+- Book repositories (Lean 4 tutorial books with .lean source files)
 - PDF downloads
 - Priority filtering
 - Resume capability (skip already-downloaded sources)
@@ -147,6 +148,56 @@ def _git_sparse_clone(url: str, path: Path, folders: list[str]) -> bool:
     except subprocess.CalledProcessError as e:
         console.print(f"[red]Sparse checkout failed: {e.stderr if hasattr(e, 'stderr') else str(e)}[/red]")
         return False
+
+
+def download_book_repo(source: dict, force: bool = False) -> bool:
+    """
+    Download a Lean 4 tutorial book repository.
+
+    Books are simpler than general git repos - they're small and don't need
+    sparse checkout. We clone the entire repo shallowly.
+
+    Args:
+        source: Source configuration dict with keys:
+            - name: Book identifier
+            - url: Git repository URL
+            - path: Local clone destination
+            - content_path: Relative path to content within repo
+            - format: "verso" or "traditional"
+        force: Force re-download even if exists
+
+    Returns:
+        True if successful, False otherwise
+    """
+    name = source["name"]
+    url = source["url"]
+    path = Path(source["path"])
+    content_path = source.get("content_path", "")
+    book_format = source.get("format", "auto")
+
+    if path.exists() and not force:
+        console.print(f"[yellow]Skipping {name} (already exists at {path})[/yellow]")
+        return True
+
+    console.print(f"[blue]Cloning book {name} from {url}...[/blue]")
+    console.print(f"[blue]  Format: {book_format}, Content path: {content_path or '(root)'}[/blue]")
+
+    # Create parent directory
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Simple shallow clone for books (they're small)
+    success = _git_full_clone(url, path)
+
+    if success:
+        # Verify content path exists
+        full_content_path = path / content_path if content_path else path
+        if full_content_path.exists():
+            lean_files = list(full_content_path.rglob("*.lean"))
+            console.print(f"[green]Book {name} cloned: {len(lean_files)} .lean files in content path[/green]")
+        else:
+            console.print(f"[yellow]Warning: Content path {content_path} not found in {name}[/yellow]")
+
+    return success
 
 
 def download_pdf(source: dict, force: bool = False) -> bool:
@@ -302,6 +353,8 @@ def main():
         success = False
         if source_type == "git":
             success = download_git_repo(source, force=args.force)
+        elif source_type == "book":
+            success = download_book_repo(source, force=args.force)
         elif source_type == "pdf":
             success = download_pdf(source, force=args.force)
         else:

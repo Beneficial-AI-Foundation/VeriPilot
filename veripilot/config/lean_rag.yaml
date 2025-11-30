@@ -35,28 +35,45 @@ corpus:
       priority: 1
       description: "Lean 4 standard library (Batteries)"
 
-    # Priority 2: Books (PDFs) - Local files (user will upload)
+    # Priority 1: Tutorial Books (git repos with .lean source files)
+    # These use either Verso MD format or traditional Lean comments for literate programming
     - name: "tpil4"
-      type: "pdf"
-      url: ""  # Local file - user uploads to data/sources/pdfs/tpil4.pdf
-      path: "data/sources/pdfs/tpil4.pdf"
+      type: "book"
+      url: "https://github.com/leanprover/theorem_proving_in_lean4"
+      path: "data/sources/books/tpil4"
+      content_path: "book/TPiL"
+      format: "verso"
       priority: 1
-      description: "Theorem Proving in Lean 4 - 194 pages"
+      description: "Theorem Proving in Lean 4 - 13 chapters (Verso format)"
 
-    - name: "metaprogramming"
-      type: "pdf"
-      url: ""  # Local file - user uploads to data/sources/pdfs/metaprogramming.pdf
-      path: "data/sources/pdfs/metaprogramming.pdf"
+    - name: "fp-lean"
+      type: "book"
+      url: "https://github.com/leanprover/fp-lean"
+      path: "data/sources/books/fp-lean"
+      content_path: "book/FPLean"
+      format: "verso"
       priority: 1
-      description: "Metaprogramming in Lean 4 - tactic development"
+      description: "Functional Programming in Lean - 16+ chapters (Verso format)"
 
-    - name: "mathematics_in_lean"
-      type: "pdf"
-      url: "https://leanprover-community.github.io/mathematics_in_lean/mathematics_in_lean.pdf"
-      path: "data/sources/pdfs/mathematics_in_lean.pdf"
-      priority: 2
-      description: "Mathematics in Lean - practical formalization"
+    - name: "mil"
+      type: "book"
+      url: "https://github.com/leanprover-community/mathematics_in_lean"
+      path: "data/sources/books/mil"
+      content_path: "MIL"
+      format: "traditional"
+      priority: 1
+      description: "Mathematics in Lean - 13 chapters, exercises (traditional format)"
 
+    - name: "metaprogramming-book"
+      type: "book"
+      url: "https://github.com/leanprover-community/lean4-metaprogramming-book"
+      path: "data/sources/books/metaprogramming-book"
+      content_path: "lean/main"
+      format: "traditional"
+      priority: 1
+      description: "Metaprogramming in Lean 4 - 10 chapters (traditional format)"
+
+    # Priority 2: Reference PDFs (kept for future use, but books preferred)
     - name: "hitchhikers_guide"
       type: "pdf"
       url: "https://browncs1951x.github.io/static/files/hitchhikersguide.pdf"
@@ -80,15 +97,6 @@ corpus:
       patterns: ["Carleson/**/*.lean"]
       priority: 3
       description: "Harmonic analysis - ongoing, advanced techniques"
-
-    # Priority 2: Documentation repos
-    - name: "metaprogramming-book-repo"
-      type: "git"
-      url: "https://github.com/leanprover-community/lean4-metaprogramming-book.git"
-      path: "data/sources/lean4-metaprogramming-book"
-      patterns: ["**/*.lean", "**/*.md"]
-      priority: 2
-      description: "Metaprogramming book source with examples"
 
   # EXCLUDED: Evaluation targets (no peeking!)
   exclude_repos:
