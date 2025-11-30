@@ -1,22 +1,116 @@
 # Lean RAG Configuration for VeriPilot
 # Phase 1a: Lean Knowledge Retrieval
+#
+# NOTE: dalek-verify-lean is EXCLUDED from RAG corpus - it's used for evaluation only.
+# RAG corpus comes from public Lean 4 resources (mathlib4, books, projects).
 
+# =============================================================================
+# CORPUS SOURCES (Priority order from resources/Lean-RAG-Resources.md)
+# =============================================================================
 corpus:
-  name: "dalek-verify-lean"
-  # Path relative to VeriPilot root
-  path: "../lean-projects/dalek-verify-lean"
-  patterns:
-    - "Curve25519Dalek/**/*.lean"
-  exclude:
-    - "ai-benchmark/**"
-    - ".lake/**"
+  # Priority 1: Core libraries
+  sources:
+    - name: "mathlib4"
+      type: "git"
+      url: "https://github.com/leanprover-community/mathlib4.git"
+      path: "data/sources/mathlib4"
+      patterns: ["Mathlib/**/*.lean"]
+      exclude: [".lake/**", "Archive/**", "Counterexamples/**"]
+      # Sparse checkout folders (for lightweight extraction)
+      sparse_checkout:
+        - "Mathlib/Tactic/**"          # Tactics - essential for proof automation
+        - "Mathlib/Algebra/**"          # Algebra foundations
+        - "Mathlib/LinearAlgebra/**"    # Linear algebra
+        - "Mathlib/AlgebraicGeometry/**" # Algebraic geometry
+        - "Mathlib/Data/**"             # Core data structures (List, Array, Nat, etc.)
+      priority: 1
+      description: "Core math library - 50K+ lemmas (selective folders)"
+
+    - name: "lean4-stdlib"
+      type: "git"
+      url: "https://github.com/leanprover/lean4.git"
+      path: "data/sources/lean4"
+      patterns: ["src/Lean/**/*.lean", "src/Init/**/*.lean"]
+      priority: 1
+      description: "Lean 4 standard library (Batteries)"
+
+    # Priority 2: Books (PDFs)
+    - name: "tpil4"
+      type: "pdf"
+      url: "https://lean-lang.org/theorem_proving_in_lean4/theorem_proving_in_lean4.pdf"
+      path: "data/sources/pdfs/tpil4.pdf"
+      priority: 1
+      description: "Theorem Proving in Lean 4 - 194 pages"
+
+    - name: "metaprogramming"
+      type: "pdf"
+      url: "https://leanprover-community.github.io/lean4-metaprogramming-book/print.pdf"
+      path: "data/sources/pdfs/metaprogramming.pdf"
+      priority: 1
+      description: "Metaprogramming in Lean 4 - tactic development"
+
+    - name: "mathematics_in_lean"
+      type: "pdf"
+      url: "https://leanprover-community.github.io/mathematics_in_lean/mathematics_in_lean.pdf"
+      path: "data/sources/pdfs/mathematics_in_lean.pdf"
+      priority: 2
+      description: "Mathematics in Lean - practical formalization"
+
+    - name: "hitchhikers_guide"
+      type: "pdf"
+      url: "https://browncs1951x.github.io/static/files/hitchhikersguide.pdf"
+      path: "data/sources/pdfs/hitchhikers_guide.pdf"
+      priority: 2
+      description: "Hitchhiker's Guide to Logical Verification"
+
+    # Priority 2: Formalization projects
+    - name: "sphere-eversion"
+      type: "git"
+      url: "https://github.com/leanprover-community/sphere-eversion.git"
+      path: "data/sources/sphere-eversion"
+      patterns: ["SphereEversion/**/*.lean"]
+      priority: 2
+      description: "Geometric topology - 10K lines, modern best practices"
+
+    - name: "carleson"
+      type: "git"
+      url: "https://github.com/fpvandoorn/carleson.git"
+      path: "data/sources/carleson"
+      patterns: ["Carleson/**/*.lean"]
+      priority: 3
+      description: "Harmonic analysis - ongoing, advanced techniques"
+
+    # Priority 2: Documentation repos
+    - name: "metaprogramming-book-repo"
+      type: "git"
+      url: "https://github.com/leanprover-community/lean4-metaprogramming-book.git"
+      path: "data/sources/lean4-metaprogramming-book"
+      patterns: ["**/*.lean", "**/*.md"]
+      priority: 2
+      description: "Metaprogramming book source with examples"
+
+  # EXCLUDED: Evaluation targets (no peeking!)
+  exclude_repos:
+    - "dalek-verify-lean"  # Lean evaluation corpus
+    - "dalek-lite"         # Verus evaluation corpus
 
 extraction:
-  # LeanDojo settings
-  cache_dir: "${LEAN_DOJO_CACHE_DIR}"
-  num_procs: 4
-  # Output file for extracted data
-  output_file: "data/extracted/lean_corpus.json"
+  # LeanDojo settings for .lean files
+  lean_dojo:
+    cache_dir: "${LEAN_DOJO_CACHE_DIR}"
+    num_procs: 4
+
+  # PDF extraction settings
+  pdf:
+    extract_code_blocks: true
+    chunk_size: 1000
+    overlap: 200
+
+  # Output files
+  output_dir: "data/extracted"
+  lean_corpus: "data/extracted/lean_corpus.json"
+  pdf_corpus: "data/extracted/pdf_corpus.json"
+  combined_corpus: "data/extracted/combined_corpus.json"
 
 databases:
   duckdb:
