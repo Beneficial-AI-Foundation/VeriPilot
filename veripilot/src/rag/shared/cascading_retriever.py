@@ -182,21 +182,19 @@ class CascadingRetriever(RAGProvider):
 
     async def _query_semantic(self, query: str) -> list[RetrievalResult]:
         """Query Qdrant with semantic embeddings."""
-        from qdrant_client.models import Filter
-
         # Compute query embedding
         query_embedding = await self._embedder.embed_query(query)
 
-        # Search in Qdrant
-        search_results = self._qdrant.search(
+        # Search in Qdrant using query_points (v1.16.1 API)
+        search_results = self._qdrant.query_points(
             collection_name=self._collection_name,
-            query_vector=query_embedding,
+            query=query_embedding,
             limit=10,
             with_payload=True,
         )
 
         results = []
-        for hit in search_results:
+        for hit in search_results.points:
             payload = hit.payload or {}
             score = hit.score  # Qdrant returns similarity score directly
 

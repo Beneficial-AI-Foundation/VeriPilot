@@ -2,17 +2,18 @@
 Integration tests for Lean RAG system.
 
 These tests require:
-- Extracted corpus in data/extracted/lean_corpus.json
-- Indexed data in DuckDB, Weaviate, Neo4j
+- Extracted corpus in data/extracted/combined_corpus.json
+- Indexed data in DuckDB, Qdrant, Neo4j
 - Environment variables set (.env file)
 
 Run with: pytest tests/integration/test_lean_rag.py -v
 """
-import pytest
 import asyncio
 import os
 import sys
 from pathlib import Path
+
+import pytest
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
@@ -23,11 +24,11 @@ load_dotenv()
 
 
 # Skip all tests if no credentials
-WEAVIATE_URL = os.getenv("WEAVIATE_URL")
+QDRANT_URL = os.getenv("QDRANT_URL")
 NEO4J_URI = os.getenv("NEO4J_URI")
 
 pytestmark = pytest.mark.skipif(
-    not WEAVIATE_URL or not NEO4J_URI,
+    not QDRANT_URL or not NEO4J_URI,
     reason="Cloud credentials not configured"
 )
 
