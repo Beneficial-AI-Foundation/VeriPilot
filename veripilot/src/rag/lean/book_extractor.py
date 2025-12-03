@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Optional
 
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
+from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn
 
 console = Console()
 
@@ -62,7 +62,7 @@ class BookDeclaration:
             "section": self.section,
             "corpus_source": self.book_source,
             "extraction_mode": "book",
-            "doc_string": self.prose_before,
+            "doc_string": f"{self.prose_before} {self.prose_after}".strip(),
             "proof_preview": self.code[:200] if self.code else "",
             "namespace": f"{self.chapter}.{self.section}".replace(" ", "_"),
             "anchor": self.anchor,
@@ -99,6 +99,12 @@ class VersoParser:
     # Match various anchor types: anchor, anchorTerm, anchorInfo, anchorEvalStep, anchorEvalSteps
     ANCHOR_PATTERN = re.compile(
         r'```(anchor|anchorTerm|anchorInfo|anchorEvalStep|anchorEvalSteps)\s+(\w+)(?:\s+\d+)?\n(.*?)\n```',
+        re.DOTALL
+    )
+
+    # Match ```lean blocks (used by tpil4) - may have optional attributes like (name := X)
+    LEAN_BLOCK_PATTERN = re.compile(
+        r'```lean(?:\s+\([^)]*\))?\n(.*?)\n```',
         re.DOTALL
     )
 
@@ -176,7 +182,77 @@ class VersoParser:
             )
             declarations.append(decl)
 
+        # Extract ```lean blocks (used by tpil4 instead of anchor blocks)
+        # Track positions already covered by anchor blocks to avoid duplicates
+        anchor_positions = {(m.start(), m.end()) for m in self.ANCHOR_PATTERN.finditer(content)}
+
+        for match in self.LEAN_BLOCK_PATTERN.finditer(content):
+            # Skip if this overlaps with an anchor block
+            if any(a_start <= match.start() < a_end for a_start, a_end in anchor_positions):
+                continue
+
+            code = match.group(1).strip()
+            if not code or len(code) < 10:  # Skip trivial blocks
+                continue
+
+            # Generate name from first identifier or hash
+            name = self._extract_lean_block_name(code, match.start())
+
+            start_pos = match.start()
+            end_pos = match.end()
+            prose_before = self._clean_prose(content[max(0, start_pos-300):start_pos])
+            prose_after = self._clean_prose(content[end_pos:min(len(content), end_pos+300)])
+
+            # Determine current section based on position
+            block_section = ""
+            for section_match in section_matches:
+                if section_match.start() < start_pos:
+                    block_section = section_match.group(2).strip()
+
+            line_start = content[:start_pos].count('\n') + 1
+            line_end = content[:end_pos].count('\n') + 1
+
+            decl = BookDeclaration(
+                name=name,
+                full_name=f"{book_source}.{chapter}.{name}",
+                decl_type="lean_example",
+                code=code,
+                type_signature=self._extract_type_signature(code),
+                file_path=str(file_path),
+                line_start=line_start,
+                line_end=line_end,
+                chapter=chapter,
+                section=block_section,
+                book_source=book_source,
+                prose_before=prose_before,
+                prose_after=prose_after,
+                tags=self._extract_tags(content, start_pos)
+            )
+            declarations.append(decl)
+
         return declarations
+
+    def _extract_lean_block_name(self, code: str, position: int) -> str:
+        """Extract a meaningful name from lean code block content."""
+        import hashlib
+        # Try to extract theorem/lemma/def/example name
+        name_match = re.match(r'(?:theorem|lemma|def|example)\s+(\w+)', code)
+        if name_match:
+            return name_match.group(1)
+        # Try to extract #check or #eval target
+        check_match = re.match(r'#(?:check|eval)\s+(\w+)', code)
+        if check_match:
+            return f"check_{check_match.group(1)}"
+        # Fall back to hash-based name
+        return f"lean_{hashlib.md5(code[:50].encode()).hexdigest()[:8]}"
+
+    def _extract_type_signature(self, code: str) -> str:
+        """Extract type signature from lean code if present."""
+        match = re.search(r':\s*([^:=]+?)\s*:=', code)
+        if match:
+            sig = match.group(1).strip()
+            return re.sub(r'\s+', ' ', sig)
+        return ""
 
     def _clean_prose(self, text: str) -> str:
         """Clean prose text by removing Verso-specific markup."""
@@ -184,8 +260,8 @@ class VersoParser:
         text = re.sub(r'\{[^}]+\}', '', text)
         # Remove extra whitespace
         text = re.sub(r'\s+', ' ', text).strip()
-        # Truncate to 200 chars
-        return text[-200:] if len(text) > 200 else text
+        # Truncate to 500 chars for better RAG context
+        return text[-500:] if len(text) > 500 else text
 
     def _extract_tags(self, content: str, pos: int) -> list[str]:
         """Extract tags from nearby %%% metadata blocks."""
@@ -354,7 +430,7 @@ class TraditionalBookParser:
                 comments.append(comment_text)
 
         result = ' '.join(comments)
-        return result[-200:] if len(result) > 200 else result
+        return result[-500:] if len(result) > 500 else result
 
     def _get_following_comments(self, content: str, pos: int) -> str:
         """Get comments after a position as prose context."""
@@ -367,7 +443,7 @@ class TraditionalBookParser:
                 comments.append(comment_text)
 
         result = ' '.join(comments)
-        return result[:200] if len(result) > 200 else result
+        return result[:500] if len(result) > 500 else result
 
     def _extract_type_signature(self, code: str) -> str:
         """Extract type signature from declaration code."""
@@ -463,7 +539,9 @@ class BookExtractor:
 
                 progress.update(task, advance=1)
 
-        console.print(f"[green]Extracted {len(declarations)} declarations from {book_source}[/green]")
+        console.print(
+            f"[green]Extracted {len(declarations)} declarations from {book_source}[/green]"
+        )
         return declarations
 
     def _detect_format(self, content_path: Path) -> str:
@@ -478,7 +556,7 @@ class BookExtractor:
                 content = lean_file.read_text(encoding='utf-8')[:2000]
                 if '#doc' in content or '%%%' in content:
                     return 'verso'
-            except:
+            except Exception:
                 pass
         return 'traditional'
 
