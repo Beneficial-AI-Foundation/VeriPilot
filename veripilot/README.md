@@ -84,10 +84,10 @@ veripilot chat
 
 | Document | Description |
 |----------|-------------|
-| [REQUIREMENTS.md](REQUIREMENTS.md) | Sacred project specification |
-| [docs/architecture/overview.md](docs/architecture/overview.md) | System architecture |
-| [docs/phases/](docs/phases/) | Phase-by-phase implementation docs |
-| [docs/claude-helpers/README.md](docs/claude-helpers/README.md) | Navigation guide for development |
+| [REQUIREMENTS.md](REQUIREMENTS.md) | Project specification |
+| [documentation/RAG-TODO.md](documentation/RAG-TODO.md) | RAG corpus expansion guide |
+| [documentation/corpus-expansion-roadmap.md](documentation/corpus-expansion-roadmap.md) | Corpus growth strategy |
+| [documentation/full-mathlib4-extraction.md](documentation/full-mathlib4-extraction.md) | Full mathlib4 extraction guide |
 
 ---
 

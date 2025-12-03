@@ -1,0 +1,180 @@
+{
+  "individual_results": [
+    {
+      "query": "Nat.add_comm",
+      "retrieved_count": 10,
+      "relevant_count": 1,
+      "retrieved": [
+        "mil.Elementary_Number_Theory.Solutions_S02_Induction_and_Recursion.add_comm",
+        "mil.Elementary_Number_Theory.Induction_and_Recursion.lean.add_comm",
+        "FixedParamPerm.numFixed",
+        "instance_2333",
+        "nat_lcm_helper"
+      ],
+      "metrics": {
+        "precision@k": 0.0,
+        "recall@k": 0.0,
+        "mrr": 0.0,
+        "ndcg@k": 0.0
+      },
+      "description": "Exact name match - commutativity of addition",
+      "type": "exact_name"
+    },
+    {
+      "query": "commutativity of natural number addition",
+      "retrieved_count": 10,
+      "relevant_count": 2,
+      "retrieved": [
+        "tpil4.Inductive Types.lean_fe9fcf21",
+        "tpil4.Inductive Types.lean_78fb407d",
+        "tpil4.Inductive Types.lean_eaaa2dde",
+        "comp_mul_right",
+        "comp_mul_left"
+      ],
+      "metrics": {
+        "precision@k": 0.0,
+        "recall@k": 0.0,
+        "mrr": 0.0,
+        "ndcg@k": 0.0
+      },
+      "description": "Natural language query for commutative property",
+      "type": "semantic"
+    },
+    {
+      "query": "List.map",
+      "retrieved_count": 10,
+      "relevant_count": 1,
+      "retrieved": [
+        "coe_list_prod",
+        "map_comp_map",
+        "Lean.List",
+        "val_list_prod",
+        "IsSymm.map"
+      ],
+      "metrics": {
+        "precision@k": 0.0,
+        "recall@k": 0.0,
+        "mrr": 0.0,
+        "ndcg@k": 0.0
+      },
+      "description": "Exact name match - list map function",
+      "type": "exact_name"
+    },
+    {
+      "query": "how to transform each element of a list",
+      "retrieved_count": 10,
+      "relevant_count": 2,
+      "retrieved": [
+        "apply",
+        "Lean.PersistentHashMap.toList",
+        "fp-lean.More Inequalities.splitList",
+        "fp-lean.Worked Example: Typed Queries.ListFlatMap",
+        "Lean.TransformStep"
+      ],
+      "metrics": {
+        "precision@k": 0.0,
+        "recall@k": 0.0,
+        "mrr": 0.0,
+        "ndcg@k": 0.0
+      },
+      "description": "Semantic query for list transformation",
+      "type": "semantic"
+    },
+    {
+      "query": "induction tactic",
+      "retrieved_count": 10,
+      "relevant_count": 2,
+      "retrieved": [
+        "mkRecursorAppPrefix",
+        "tpil4.Inductive Types.lean_3983c755",
+        "checkForInductionWithNoAlts",
+        "tpil4.Tactics.lean_c5769067",
+        "elabFunTargetCall"
+      ],
+      "metrics": {
+        "precision@k": 0.3,
+        "recall@k": 0.5,
+        "mrr": 0.3333333333333333,
+        "ndcg@k": 0.7184074368181641
+      },
+      "description": "Tactic keyword search",
+      "type": "keyword"
+    },
+    {
+      "query": "prove equality by rewriting",
+      "retrieved_count": 9,
+      "relevant_count": 3,
+      "retrieved": [
+        "tpil4.Quantifiers and Equality.lean_25a0f8a7",
+        "backwardWeight",
+        "Lean.Doc.Inline.cast",
+        "forwardWeight",
+        "tpil4.Inductive Types.lean_90c84f33"
+      ],
+      "metrics": {
+        "precision@k": 0.3333333333333333,
+        "recall@k": 0.6666666666666666,
+        "mrr": 0.25,
+        "ndcg@k": 0.49141527484330916
+      },
+      "description": "Semantic tactic query",
+      "type": "semantic"
+    },
+    {
+      "query": "Scalar",
+      "retrieved_count": 10,
+      "relevant_count": 1,
+      "retrieved": [
+        "matchScalarsAux",
+        "matchScalars",
+        "addIsScalarTowerInstanceFromRingHomComp",
+        "instance_12007",
+        "restrictScalars\u2081\u2082_inj"
+      ],
+      "metrics": {
+        "precision@k": 0.9,
+        "recall@k": 1.0,
+        "mrr": 1.0,
+        "ndcg@k": 4.112882780014953
+      },
+      "description": "Type signature pattern",
+      "type": "type_signature"
+    },
+    {
+      "query": "field element operations",
+      "retrieved_count": 10,
+      "relevant_count": 2,
+      "retrieved": [
+        "eqLocusField",
+        "Lean.Elab.Command.StructFieldInfo",
+        "mem_fieldRange",
+        "proc",
+        "StructureFieldInfo"
+      ],
+      "metrics": {
+        "precision@k": 0.5,
+        "recall@k": 0.5,
+        "mrr": 1.0,
+        "ndcg@k": 1.7621787459701899
+      },
+      "description": "Algebraic structure semantic query",
+      "type": "semantic"
+    }
+  ],
+  "aggregate": {
+    "mean_precision@k": 0.25416666666666665,
+    "min_precision@k": 0.0,
+    "max_precision@k": 0.9,
+    "mean_recall@k": 0.3333333333333333,
+    "min_recall@k": 0.0,
+    "max_recall@k": 1.0,
+    "mean_mrr": 0.32291666666666663,
+    "min_mrr": 0.0,
+    "max_mrr": 1.0,
+    "mean_ndcg@k": 0.8856105297058271,
+    "min_ndcg@k": 0.0,
+    "max_ndcg@k": 4.112882780014953
+  },
+  "query_count": 8,
+  "top_k": 10
+}

@@ -19,6 +19,9 @@ corpus:
       # Sparse checkout folders (for lightweight extraction)
       sparse_checkout:
         - "Mathlib/Tactic/**"                      # Tactics - essential for proof automation
+        - "Mathlib/Init/**"                        # Core lemmas (Nat.add_comm, etc.)
+        - "Mathlib/Logic/**"                       # Basic logic
+        - "Mathlib/Data/**"                        # Data structures
         - "Mathlib/Algebra/Group/**"               # Group theory
         - "Mathlib/Algebra/Ring/**"                # Ring theory
         - "Mathlib/Algebra/Field/**"               # Field theory
@@ -33,7 +36,23 @@ corpus:
       path: "data/sources/lean4"
       patterns: ["src/Lean/**/*.lean", "src/Init/**/*.lean"]
       priority: 1
-      description: "Lean 4 standard library (Batteries)"
+      description: "Lean 4 standard library"
+
+    - name: "batteries"
+      type: "git"
+      url: "https://github.com/leanprover/std4.git"
+      path: "data/sources/batteries"
+      patterns: ["Std/**/*.lean"]
+      priority: 1
+      description: "Batteries (std4) - Data structures, List.map, HashMap, etc."
+
+    - name: "aesop"
+      type: "git"
+      url: "https://github.com/leanprover-community/aesop.git"
+      path: "data/sources/aesop"
+      patterns: ["Aesop/**/*.lean"]
+      priority: 1
+      description: "Aesop proof automation - tactics and rule sets"
 
     # Priority 1: Tutorial Books (git repos with .lean source files)
     # These use either Verso MD format or traditional Lean comments for literate programming

@@ -217,6 +217,8 @@ docs/
 veripilot/data/lean_index/
 veripilot/data/verus_index/
 veripilot/data/embeddings/
+veripilot/data/sources/
+veripilot/data/extracted/
 veripilot/.venv/
 veripilot/__pycache__/
 veripilot/.pytest_cache/
