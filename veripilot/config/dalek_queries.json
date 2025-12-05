@@ -1,0 +1,62 @@
+[
+  {
+    "query": "Scalar52",
+    "relevant": ["Scalar52", "Scalar52_as_Nat"],
+    "description": "Scalar 52-bit representation type",
+    "type": "exact_name"
+  },
+  {
+    "query": "Scalar52_as_Nat",
+    "relevant": ["Scalar52_as_Nat"],
+    "description": "Convert Scalar52 to natural number",
+    "type": "exact_name"
+  },
+  {
+    "query": "U64x5_slice_as_Nat",
+    "relevant": ["U64x5_slice_as_Nat", "U64x5"],
+    "description": "Convert U64 array slice to natural number",
+    "type": "exact_name"
+  },
+  {
+    "query": "subtraction modular arithmetic",
+    "relevant": ["sub", "MOD", "subtract"],
+    "description": "Modular subtraction operations",
+    "type": "semantic"
+  },
+  {
+    "query": "progress tactic",
+    "relevant": ["progress", "progress*"],
+    "description": "Aeneas progress tactic for monadic code",
+    "type": "keyword"
+  },
+  {
+    "query": "grind tactic arithmetic",
+    "relevant": ["grind", "omega", "scalar_tac"],
+    "description": "Tactics for arithmetic simplification",
+    "type": "keyword"
+  },
+  {
+    "query": "simp simplification lemmas",
+    "relevant": ["simp", "simplify", "simp_all"],
+    "description": "Simplification tactic and lemmas",
+    "type": "keyword"
+  },
+  {
+    "query": "Array U64 bounds",
+    "relevant": ["Array", "U64", "bounds"],
+    "description": "Array with U64 elements and bounds checking",
+    "type": "type_signature"
+  },
+  {
+    "query": "modular congruence MOD L",
+    "relevant": ["MOD", "congruence", "mod"],
+    "description": "Modular arithmetic with group order L",
+    "type": "semantic"
+  },
+  {
+    "query": "unfold function definition",
+    "relevant": ["unfold", "delta"],
+    "description": "Unfold/expand function definitions",
+    "type": "keyword"
+  }
+]
