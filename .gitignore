@@ -222,6 +222,8 @@ veripilot/data/extracted/
 veripilot/.venv/
 veripilot/__pycache__/
 veripilot/.pytest_cache/
+veripilot/data/sources/lean4/
+veripilot/data/sources/mathlib4/
 
 # Don't ignore submodule tracking
 !.gitmodules
