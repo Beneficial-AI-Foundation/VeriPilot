@@ -27,6 +27,16 @@ dependencies = [
     # Embeddings - BGE (local, disk-conscious)
     "sentence-transformers>=2.2.0",
 
+    # LLM Clients (MVP Phase 2)
+    "google-genai>=1.0.0",          # Gemini 3.0 via Google AI SDK
+    "anthropic>=0.39.0",            # Claude Opus/Sonnet 4.5
+    "aristotlelib>=0.1.0",          # Aristotle Lean specialist
+    "openai>=1.0.0",                # OpenRouter uses OpenAI-compatible API
+
+    # CLI (MVP Phase 4)
+    "typer>=0.12.0",                # CLI framework
+    "click>=8.0.0",                 # Typer dependency
+
     # Utilities
     "pyyaml>=6.0",
     "pydantic>=2.0",

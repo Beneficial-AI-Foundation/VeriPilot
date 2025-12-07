@@ -1,0 +1,63 @@
+# VeriPilot Dependencies
+# Generated from pyproject.toml
+# Install with: pip install -r requirements.txt
+# Or use: pip install -e .
+
+# ============================================================================
+# Core Dependencies
+# ============================================================================
+
+# Lean Extraction
+lean-dojo>=2.0.0
+pymupdf>=1.23.0  # PDF extraction
+
+# RAG Framework
+llama-index>=0.10.0
+llama-index-vector-stores-qdrant>=0.2.0
+llama-index-graph-stores-neo4j>=0.1.0
+
+# Cloud Databases
+qdrant-client>=1.7.0
+neo4j>=5.0.0
+duckdb>=0.10.0
+
+# Embeddings - BGE (local, disk-conscious)
+sentence-transformers>=2.2.0
+
+# LLM Clients (MVP Phase 2)
+google-genai>=1.0.0          # Gemini 3.0 via Google AI SDK
+anthropic>=0.39.0            # Claude Opus/Sonnet 4.5
+aristotlelib>=0.1.0          # Aristotle Lean specialist
+openai>=1.0.0                # OpenRouter uses OpenAI-compatible API
+
+# CLI (MVP Phase 4)
+typer>=0.12.0                # CLI framework
+click>=8.0.0                 # Typer dependency
+
+# Utilities
+pyyaml>=6.0
+pydantic>=2.0
+rich>=13.0
+python-dotenv>=1.0.0
+httpx>=0.25.0
+
+# ============================================================================
+# Development Dependencies (optional)
+# ============================================================================
+# Uncomment to install dev tools:
+# pytest>=8.0
+# pytest-asyncio>=0.23.0
+# ruff>=0.1.0
+# mypy>=1.8
+
+# ============================================================================
+# Installation Instructions
+# ============================================================================
+# Recommended: Install in editable mode with dev dependencies
+#   pip install -e ".[dev]"
+#
+# Or install just core dependencies:
+#   pip install -e .
+#
+# Or use this requirements file:
+#   pip install -r requirements.txt
