@@ -3,15 +3,29 @@ Prompt templates for the Prover Agent.
 
 Provides model-specific prompt templates for Lean proof generation,
 with special handling for Aeneas-generated verification code.
+
+Prompts are loaded from markdown files in prompts/verifier/ when available,
+with fallback to hardcoded defaults for backwards compatibility.
 """
 
+import logging
 from typing import Optional
 
 from parser import SorryLocation
 from .context_formatter import format_error_context
 
+logger = logging.getLogger(__name__)
 
-# System prompts for different models
+# Try to import prompt loader
+try:
+    from .prompt_loader import load_prompt
+    PROMPT_LOADER_AVAILABLE = True
+except ImportError:
+    PROMPT_LOADER_AVAILABLE = False
+    logger.debug("prompt_loader not available, using hardcoded prompts")
+
+
+# Hardcoded fallback prompts (used when files not found)
 SYSTEM_PROMPT_DEFAULT = """You are an expert in the Lean 4 theorem prover, specializing in program verification.
 
 Your task is to generate valid Lean 4 proof tactics to replace `sorry` placeholders.
@@ -50,9 +64,28 @@ Requirements:
 - No axioms"""
 
 
+def _load_prompt_safe(name: str) -> Optional[str]:
+    """
+    Safely load a prompt from file, returning None on failure.
+    """
+    if not PROMPT_LOADER_AVAILABLE:
+        return None
+    try:
+        return load_prompt(name)
+    except FileNotFoundError:
+        logger.debug(f"Prompt file not found: {name}, using fallback")
+        return None
+    except Exception as e:
+        logger.warning(f"Error loading prompt {name}: {e}")
+        return None
+
+
 def build_system_prompt(model: str = "default") -> str:
     """
     Build the system prompt for a specific model.
+
+    Attempts to load from prompts/verifier/system_prompt_{model}_v1.md first,
+    then falls back to hardcoded prompts.
 
     Args:
         model: Model identifier (gemini, claude, aristotle, default)
@@ -60,12 +93,26 @@ def build_system_prompt(model: str = "default") -> str:
     Returns:
         System prompt string
     """
+    # Aristotle doesn't use system prompts (file-based API)
+    if model == "aristotle":
+        return ""
+
+    # Try to load from file first
+    if model in ("gemini", "claude"):
+        loaded = _load_prompt_safe(f"system_prompt_{model}")
+        if loaded:
+            return loaded
+    else:
+        loaded = _load_prompt_safe("system_prompt")
+        if loaded:
+            return loaded
+
+    # Fall back to hardcoded prompts
     prompts = {
         "gemini": SYSTEM_PROMPT_GEMINI,
         "claude": SYSTEM_PROMPT_CLAUDE,
         "default": SYSTEM_PROMPT_DEFAULT,
     }
-    # Aristotle doesn't use system prompts (file-based API)
     return prompts.get(model, SYSTEM_PROMPT_DEFAULT)
 
 

@@ -3,14 +3,57 @@ File modification utilities for VeriPilot.
 
 Handles replacing sorry placeholders with generated proofs,
 with backup/restore support for safe rollback.
+
+Includes attempt-numbered file copies and cumulative logging
+for debugging and observability.
 """
 
+import json
 import shutil
+from dataclasses import dataclass, asdict
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from parser import SorryLocation
+
+
+@dataclass
+class AttemptLog:
+    """Log entry for a single proof attempt."""
+
+    attempt: int
+    proof_code: str
+    build_success: bool
+    errors: list[str]
+    timestamp: str
+    elapsed_time: float
+    model_used: str = ""
+    temperature: float = 0.0
+
+    @classmethod
+    def create(
+        cls,
+        attempt: int,
+        proof_code: str,
+        build_success: bool,
+        errors: list[str],
+        elapsed_time: float,
+        model_used: str = "",
+        temperature: float = 0.0,
+    ) -> "AttemptLog":
+        """Create a new AttemptLog with current timestamp."""
+        return cls(
+            attempt=attempt,
+            proof_code=proof_code,
+            build_success=build_success,
+            errors=errors,
+            timestamp=datetime.now().isoformat(),
+            elapsed_time=elapsed_time,
+            model_used=model_used,
+            temperature=temperature,
+        )
 
 
 def backup_file(file_path: str) -> str:
@@ -255,4 +298,194 @@ def cleanup_vp_files(vp_path: str):
     bak_file = Path(str(vp_path) + ".bak")
     if bak_file.exists():
         bak_file.unlink()
+
+
+# ============================================================================
+# Attempt-numbered file copies and cumulative logging
+# ============================================================================
+
+
+def create_attempt_copy(original_path: str, attempt: int) -> str:
+    """
+    Create VP_N_originalfile.lean for attempt N.
+
+    Args:
+        original_path: Path to original .lean file
+        attempt: Attempt number (1, 2, 3, ...)
+
+    Returns:
+        Path to VP_N_<filename>.lean
+    """
+    original = Path(original_path)
+    vp_name = f"VP_{attempt}_{original.name}"
+    vp_path = original.parent / vp_name
+
+    shutil.copy2(original, vp_path)
+    return str(vp_path)
+
+
+def cleanup_intermediate_attempts(original_path: str, final_attempt: int) -> list[str]:
+    """
+    Delete VP_1 through VP_{N-1}, keeping only VP_N.
+
+    Args:
+        original_path: Original file path
+        final_attempt: The final attempt number to keep
+
+    Returns:
+        List of deleted file paths
+    """
+    original = Path(original_path)
+    deleted = []
+
+    for i in range(1, final_attempt):
+        attempt_path = original.parent / f"VP_{i}_{original.name}"
+        if attempt_path.exists():
+            attempt_path.unlink()
+            deleted.append(str(attempt_path))
+
+    return deleted
+
+
+def cleanup_all_attempt_files(original_path: str, max_attempts: int = 10) -> list[str]:
+    """
+    Delete all VP_N_ files for a given original file.
+
+    Args:
+        original_path: Original file path
+        max_attempts: Maximum attempt number to check
+
+    Returns:
+        List of deleted file paths
+    """
+    original = Path(original_path)
+    deleted = []
+
+    for i in range(1, max_attempts + 1):
+        attempt_path = original.parent / f"VP_{i}_{original.name}"
+        if attempt_path.exists():
+            attempt_path.unlink()
+            deleted.append(str(attempt_path))
+
+    # Also clean up basic VP_ file
+    basic_vp = original.parent / f"VP_{original.name}"
+    if basic_vp.exists():
+        basic_vp.unlink()
+        deleted.append(str(basic_vp))
+
+    return deleted
+
+
+def write_attempt_log(
+    original_path: str,
+    logs: list[AttemptLog],
+    format: str = "json",
+) -> str:
+    """
+    Write cumulative log to VP_log_originalfile.{format}.
+
+    Args:
+        original_path: Original file path (used for naming)
+        logs: List of AttemptLog entries
+        format: Output format - "json" (default), "md", "txt"
+
+    Returns:
+        Path to created log file
+    """
+    original = Path(original_path)
+    log_name = f"VP_log_{original.stem}.{format}"
+    log_path = original.parent / log_name
+
+    if format == "json":
+        with open(log_path, "w", encoding="utf-8") as f:
+            json.dump([asdict(log) for log in logs], f, indent=2)
+
+    elif format == "md":
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write(f"# Verification Log: {original.name}\n\n")
+            f.write(f"Generated: {datetime.now().isoformat()}\n\n")
+            f.write(f"Total Attempts: {len(logs)}\n\n")
+            f.write("---\n\n")
+
+            for log in logs:
+                status = "SUCCESS" if log.build_success else "FAILED"
+                f.write(f"## Attempt {log.attempt} [{status}]\n\n")
+                f.write(f"- **Timestamp:** {log.timestamp}\n")
+                f.write(f"- **Elapsed:** {log.elapsed_time:.2f}s\n")
+                if log.model_used:
+                    f.write(f"- **Model:** {log.model_used}\n")
+                if log.temperature > 0:
+                    f.write(f"- **Temperature:** {log.temperature}\n")
+                f.write("\n**Proof:**\n```lean\n")
+                f.write(log.proof_code)
+                f.write("\n```\n\n")
+                if log.errors:
+                    f.write("**Errors:**\n")
+                    for error in log.errors:
+                        f.write(f"- {error}\n")
+                f.write("\n---\n\n")
+
+    elif format == "txt":
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write(f"Verification Log: {original.name}\n")
+            f.write(f"Generated: {datetime.now().isoformat()}\n")
+            f.write(f"Total Attempts: {len(logs)}\n")
+            f.write("=" * 60 + "\n\n")
+
+            for log in logs:
+                status = "SUCCESS" if log.build_success else "FAILED"
+                f.write(f"Attempt {log.attempt} [{status}]\n")
+                f.write("-" * 40 + "\n")
+                f.write(f"Time: {log.timestamp}\n")
+                f.write(f"Elapsed: {log.elapsed_time:.2f}s\n")
+                if log.model_used:
+                    f.write(f"Model: {log.model_used}\n")
+                f.write(f"Proof:\n{log.proof_code}\n")
+                if log.errors:
+                    f.write("Errors:\n")
+                    for error in log.errors:
+                        f.write(f"  - {error}\n")
+                f.write("\n")
+
+    else:
+        raise ValueError(f"Unsupported log format: {format}")
+
+    return str(log_path)
+
+
+def read_attempt_log(log_path: str) -> list[AttemptLog]:
+    """
+    Read attempt logs from a JSON log file.
+
+    Args:
+        log_path: Path to the log file
+
+    Returns:
+        List of AttemptLog entries
+    """
+    with open(log_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    return [AttemptLog(**entry) for entry in data]
+
+
+def cleanup_log_file(original_path: str, format: str = "json") -> bool:
+    """
+    Remove the log file for a given original file.
+
+    Args:
+        original_path: Original file path
+        format: Log format extension
+
+    Returns:
+        True if file was deleted, False if not found
+    """
+    original = Path(original_path)
+    log_name = f"VP_log_{original.stem}.{format}"
+    log_path = original.parent / log_name
+
+    if log_path.exists():
+        log_path.unlink()
+        return True
+    return False
 

@@ -66,10 +66,27 @@ __all__ = [
     "VerificationResult",
     "LeanError",
     "BuildResult",
+    "AttemptLog",
     "verify_proof",
     "run_lake_build",
     "parse_lean_errors",
+    "create_attempt_copy",
+    "cleanup_intermediate_attempts",
+    "write_attempt_log",
+    "read_attempt_log",
 ]
+
+
+# Import AttemptLog from file_modifier
+from .file_modifier import (
+    AttemptLog,
+    create_attempt_copy,
+    cleanup_intermediate_attempts,
+    cleanup_all_attempt_files,
+    write_attempt_log,
+    read_attempt_log,
+    cleanup_log_file,
+)
 
 
 # Re-export functions (imported lazily when accessed)
