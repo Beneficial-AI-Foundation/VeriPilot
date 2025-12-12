@@ -5,14 +5,158 @@ Formats RAG results and file context into structured
 prompt sections for LLM consumption.
 """
 
+from pathlib import Path
+from typing import Optional
+
 from interfaces.rag_provider import RetrievalResult
 from parser import SorryLocation
+
+
+# =============================================================================
+# Import Resolution Functions
+# =============================================================================
+
+
+def resolve_import_to_file(import_path: str, project_dir: str) -> Optional[Path]:
+    """
+    Resolve a Lean import path to an actual file path.
+
+    Examples:
+        "Dalek.Basic" → project_dir/Dalek/Basic.lean
+        "Aeneas.Primitives" → project_dir/Aeneas/Primitives.lean
+
+    Args:
+        import_path: Lean import path (e.g., "Dalek.Basic")
+        project_dir: Root directory of the Lean project
+
+    Returns:
+        Path to the file if it exists, None otherwise
+    """
+    # Convert dot notation to path
+    # e.g., "Dalek.Basic" → "Dalek/Basic.lean"
+    parts = import_path.split(".")
+    relative_path = "/".join(parts) + ".lean"
+
+    project_path = Path(project_dir)
+
+    # Try direct resolution
+    candidate = project_path / relative_path
+    if candidate.exists():
+        return candidate
+
+    # Try in common subdirectories (lake-packages, etc.)
+    for subdir in ["", "lake-packages", ".lake/packages"]:
+        for pkg_dir in (project_path / subdir).glob("*") if subdir else [project_path]:
+            candidate = pkg_dir / relative_path
+            if candidate.exists():
+                return candidate
+
+    return None
+
+
+def load_import_content(
+    import_path: str,
+    project_dir: str,
+    max_lines: int = 200,
+) -> str:
+    """
+    Load content from a Lean import file.
+
+    Args:
+        import_path: Lean import path
+        project_dir: Root directory of the Lean project
+        max_lines: Maximum lines to include (truncated if longer)
+
+    Returns:
+        File content (truncated if necessary), or empty string if not found
+    """
+    file_path = resolve_import_to_file(import_path, project_dir)
+    if file_path is None:
+        return ""
+
+    try:
+        content = file_path.read_text(encoding="utf-8")
+        lines = content.split("\n")
+
+        if len(lines) > max_lines:
+            truncated = lines[:max_lines]
+            truncated.append(f"-- ... truncated ({len(lines) - max_lines} more lines)")
+            return "\n".join(truncated)
+
+        return content
+    except Exception:
+        return ""
+
+
+def format_import_contents(
+    imports: list[str],
+    project_dir: str,
+    max_lines_per_file: int = 150,
+    max_total_lines: int = 500,
+) -> str:
+    """
+    Format import file contents for LLM context.
+
+    Args:
+        imports: List of import statements (e.g., ["import Dalek.Basic"])
+        project_dir: Root directory of the Lean project
+        max_lines_per_file: Max lines to include per import
+        max_total_lines: Max total lines across all imports
+
+    Returns:
+        Markdown-formatted import contents
+    """
+    if not imports or not project_dir:
+        return ""
+
+    sections = []
+    total_lines = 0
+
+    for imp in imports:
+        if total_lines >= max_total_lines:
+            sections.append(f"-- Skipped remaining imports (token budget)")
+            break
+
+        # Extract module path from import statement
+        # "import Dalek.Basic" → "Dalek.Basic"
+        module_path = imp.replace("import ", "").strip()
+
+        # Skip Mathlib and standard library imports (too large)
+        if module_path.startswith(("Mathlib", "Init", "Lean", "Std")):
+            continue
+
+        content = load_import_content(module_path, project_dir, max_lines_per_file)
+        if not content:
+            continue
+
+        line_count = content.count("\n") + 1
+        if total_lines + line_count > max_total_lines:
+            # Truncate to fit budget
+            remaining = max_total_lines - total_lines
+            content_lines = content.split("\n")[:remaining]
+            content = "\n".join(content_lines)
+            content += f"\n-- ... truncated (budget)"
+
+        sections.append(f"### {module_path}")
+        sections.append("```lean")
+        sections.append(content)
+        sections.append("```")
+        sections.append("")
+
+        total_lines += line_count
+
+    if not sections:
+        return ""
+
+    return "## Imported File Contents\n\n" + "\n".join(sections)
 
 
 def format_context(
     sorry: SorryLocation,
     file_content: str,
     rag_results: list[RetrievalResult],
+    project_dir: Optional[str] = None,
+    user_context: Optional[str] = None,
 ) -> str:
     """
     Format all context for an LLM prompt.
@@ -20,12 +164,16 @@ def format_context(
     Combines:
     - RAG results (lemmas, tactics, proofs)
     - File context (imports, theorem, proof prefix)
+    - Import file contents (if project_dir provided)
+    - User-provided context (if provided)
     - Proof strategy hints
 
     Args:
         sorry: The sorry location
         file_content: Full file content
         rag_results: Retrieved RAG results
+        project_dir: Optional project directory for import resolution
+        user_context: Optional user-provided context string
 
     Returns:
         Formatted context string for prompt
@@ -41,7 +189,17 @@ def format_context(
     file_section = format_file_context(sorry, file_content)
     sections.append(file_section)
 
-    # 3. Proof hints
+    # 3. Import file contents (if project_dir provided)
+    if project_dir and sorry.imports:
+        import_section = format_import_contents(sorry.imports, project_dir)
+        if import_section:
+            sections.append(import_section)
+
+    # 4. User-provided context
+    if user_context:
+        sections.append("## Additional Context\n\n" + user_context)
+
+    # 5. Proof hints
     hints_section = format_proof_hints(sorry)
     sections.append(hints_section)
 

@@ -299,10 +299,19 @@ class TestLLMClient:
         assert "aristotle" in PROVIDERS
 
     def test_gemini_config(self):
-        """Test Gemini provider configuration."""
+        """Test Gemini provider configuration (Direct Google API)."""
         from agent.llm_client import PROVIDERS
 
         gemini = PROVIDERS["gemini"]
+        assert gemini.client_type == "google"
+        assert gemini.model == "gemini-3-pro-preview"
+        assert gemini.env_key == "GOOGLE_API_KEY"
+
+    def test_gemini_openrouter_config(self):
+        """Test Gemini OpenRouter fallback configuration."""
+        from agent.llm_client import PROVIDERS
+
+        gemini = PROVIDERS["gemini-openrouter"]
         assert gemini.client_type == "openai"
         assert "openrouter" in gemini.base_url
         assert gemini.env_key == "OPENROUTER_API_KEY"

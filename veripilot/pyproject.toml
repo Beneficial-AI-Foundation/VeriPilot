@@ -57,6 +57,9 @@ dev = [
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
+[project.scripts]
+veripilot = "cli.main:app"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

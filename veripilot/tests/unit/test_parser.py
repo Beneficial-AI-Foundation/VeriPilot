@@ -7,10 +7,22 @@ from src.parser import SorryLocation, LeanGoal, find_sorries
 from src.parser.goal_extractor import parse_goal_response, format_goal_for_prompt
 
 
+def _find_benchmark_file() -> str:
+    """Find the benchmark file in either BAIF or legacy path."""
+    candidates = [
+        "/workspace/projects/BAIF/VeriPilot/lean-projects/dalek-verify-lean/ai-benchmark/tests/input.lean",
+        "/workspace/projects/VeriPilot/lean-projects/dalek-verify-lean/ai-benchmark/tests/input.lean",
+    ]
+    for path in candidates:
+        if Path(path).exists():
+            return path
+    raise FileNotFoundError(f"Benchmark file not found in: {candidates}")
+
+
 @pytest.fixture
 def benchmark_file():
     """Path to the dalek benchmark input.lean file."""
-    return "/workspace/projects/VeriPilot/lean-projects/dalek-verify-lean/ai-benchmark/tests/input.lean"
+    return _find_benchmark_file()
 
 
 class TestSorryFinder:

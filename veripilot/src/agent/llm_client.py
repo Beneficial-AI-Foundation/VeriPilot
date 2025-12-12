@@ -2,7 +2,7 @@
 Multi-provider LLM client for the Prover Agent.
 
 Supports:
-- Gemini 3 Pro (via OpenRouter)
+- Gemini 3 Pro (via Direct Google API or OpenRouter)
 - Claude Sonnet/Opus 4.5 (via Anthropic API)
 - Aristotle (via aristotlelib - file-based)
 """
@@ -26,7 +26,7 @@ from .rag_query import retrieve_context
 class ProviderConfig:
     """Configuration for an LLM provider."""
     name: str
-    client_type: str  # "openai", "anthropic", "aristotle"
+    client_type: str  # "google", "openai", "anthropic", "aristotle"
     model: str
     env_key: str
     base_url: Optional[str] = None
@@ -34,8 +34,17 @@ class ProviderConfig:
 
 # Provider configurations
 PROVIDERS = {
+    # Primary: Direct Google API (preferred when GOOGLE_API_KEY is set)
+    # Using Gemini 3.0 Pro Preview as default for VeriPilot verifier agent
     "gemini": ProviderConfig(
-        name="Gemini 3 Pro",
+        name="Gemini 3.0 Pro",
+        client_type="google",
+        model="gemini-3-pro-preview",
+        env_key="GOOGLE_API_KEY",
+    ),
+    # Fallback: OpenRouter (uses OPENROUTER_API_KEY)
+    "gemini-openrouter": ProviderConfig(
+        name="Gemini 3 Pro (OpenRouter)",
         client_type="openai",
         model="google/gemini-3-pro-preview",
         env_key="OPENROUTER_API_KEY",
@@ -75,6 +84,22 @@ class LLMClient:
         """Initialize the LLM client."""
         self._openai_client = None
         self._anthropic_client = None
+        self._google_client = None
+
+    def _get_google_client(self):
+        """Get or create Google GenAI client."""
+        if self._google_client is None:
+            try:
+                from google import genai
+            except ImportError:
+                raise ImportError("google-genai package not installed. Run: pip install google-genai")
+
+            api_key = os.getenv("GOOGLE_API_KEY")
+            if not api_key:
+                raise ValueError("GOOGLE_API_KEY not set in environment")
+
+            self._google_client = genai.Client(api_key=api_key)
+        return self._google_client
 
     def _get_openai_client(self, provider: ProviderConfig):
         """Get or create OpenAI-compatible client."""
@@ -138,7 +163,11 @@ class LLMClient:
         if system_prompt is None:
             system_prompt = build_system_prompt(model)
 
-        if provider.client_type == "openai":
+        if provider.client_type == "google":
+            return await self._generate_google(
+                provider, user_prompt, system_prompt, temperature, max_tokens
+            )
+        elif provider.client_type == "openai":
             return await self._generate_openai(
                 provider, user_prompt, system_prompt, temperature, max_tokens
             )
@@ -150,6 +179,38 @@ class LLMClient:
             raise ValueError("Aristotle uses file-based API. Use generate_with_aristotle() instead.")
         else:
             raise ValueError(f"Unknown client type: {provider.client_type}")
+
+    async def _generate_google(
+        self,
+        provider: ProviderConfig,
+        user_prompt: str,
+        system_prompt: str,
+        temperature: float,
+        max_tokens: int,
+    ) -> str:
+        """Generate using Google GenAI API (direct)."""
+        from google.genai import types
+        import asyncio
+
+        client = self._get_google_client()
+
+        # Combine system prompt and user prompt for Google's format
+        full_prompt = f"{system_prompt}\n\n{user_prompt}" if system_prompt else user_prompt
+
+        # Google GenAI uses synchronous API, run in executor
+        def _sync_generate():
+            response = client.models.generate_content(
+                model=provider.model,
+                contents=full_prompt,
+                config=types.GenerateContentConfig(
+                    temperature=temperature,
+                    max_output_tokens=max_tokens,
+                ),
+            )
+            return response.text if response.text else ""
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _sync_generate)
 
     async def _generate_openai(
         self,
