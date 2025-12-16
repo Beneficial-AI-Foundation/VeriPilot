@@ -386,3 +386,60 @@ def format_error_context(error: str, prev_proof: str) -> str:
     ]
 
     return "\n".join(lines)
+
+
+def format_tactic_history(
+    successful_tactics: list[str],
+    failed_tactics: list[str],
+    max_entries: int = 5,
+) -> str:
+    """
+    Format tactic history for context accumulation in prompts.
+
+    Implements Poetiq pattern (Section 1.2): Prompts as state machines.
+    Accumulated successful tactic patterns from prior iterations become
+    in-context examples for subsequent attempts.
+
+    Args:
+        successful_tactics: Tactics that worked (can be used as positive examples)
+        failed_tactics: Tactics that failed (negative examples)
+        max_entries: Maximum entries to show per category (sliding window)
+
+    Returns:
+        Markdown-formatted tactic history for prompt inclusion
+    """
+    lines = []
+
+    # Include successful tactics as positive examples
+    if successful_tactics:
+        recent_success = successful_tactics[-max_entries:]
+        lines.append("## What Has Worked")
+        lines.append("")
+        lines.append("The following tactic patterns were successful in similar contexts:")
+        lines.append("")
+        for i, tactic in enumerate(recent_success, 1):
+            # Truncate long tactics
+            tactic_preview = tactic[:200] + "..." if len(tactic) > 200 else tactic
+            lines.append(f"{i}. ```lean")
+            lines.append(f"   {tactic_preview}")
+            lines.append("   ```")
+        lines.append("")
+
+    # Include failed tactics as negative examples
+    if failed_tactics:
+        recent_failed = failed_tactics[-max_entries:]
+        lines.append("## What Did NOT Work")
+        lines.append("")
+        lines.append("Avoid these approaches - they have already been tried and failed:")
+        lines.append("")
+        for i, tactic in enumerate(recent_failed, 1):
+            # Truncate long tactics
+            tactic_preview = tactic[:150] + "..." if len(tactic) > 150 else tactic
+            lines.append(f"{i}. ~~`{tactic_preview}`~~")
+        lines.append("")
+        lines.append("**Try a different approach.**")
+
+    if not lines:
+        return ""
+
+    return "\n".join(lines)

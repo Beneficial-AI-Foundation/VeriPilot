@@ -6,8 +6,14 @@ Orchestrates the proof verification cycle:
 2. Run lake build
 3. Parse errors
 4. Retry with error feedback (up to max_attempts)
+
+Implements Poetiq patterns (POETIQ_deep_dive.md):
+- Section 2.1: Iterative refinement through feedback loops
+- Section 2.3: Self-auditing and termination logic
+- Section 4.4: Error message normalization for LLM-friendly feedback
 """
 
+import logging
 import time
 from typing import Optional, TYPE_CHECKING
 
@@ -25,10 +31,19 @@ from .error_parser import (
     extract_error_summary,
     filter_errors_for_file,
 )
+from .self_audit import (
+    SelfAuditingController,
+    AuditConfig,
+    estimate_goal_complexity,
+    estimate_tokens,
+)
+from .error_normalizer import ErrorMessageNormalizer, format_error_for_prompt
 
 if TYPE_CHECKING:
     from parser import SorryLocation
     from agent import ProofResult
+
+logger = logging.getLogger(__name__)
 
 
 # Default project directory for dalek benchmark
@@ -42,17 +57,26 @@ async def verify_proof(
     max_attempts: int = 4,
     project_dir: str = DEFAULT_PROJECT_DIR,
     timeout: int = 300,
+    audit_config: Optional[AuditConfig] = None,
 ) -> VerificationResult:
     """
-    Verify a proof with retry loop.
+    Verify a proof with retry loop and Poetiq self-auditing.
 
     This is the main entry point for proof verification. It:
     1. Backs up the original file
     2. Replaces sorry with the generated proof
     3. Runs lake build to verify
-    4. If errors, regenerates proof with error feedback
-    5. Repeats up to max_attempts times
-    6. Restores original on failure
+    4. If errors, checks self-audit for early termination
+    5. Regenerates proof with normalized error feedback
+    6. Accumulates tactic history across iterations
+    7. Repeats up to max_attempts times or until self-audit stops
+    8. Restores original on failure
+
+    Poetiq patterns implemented:
+    - Iterative refinement (Section 2.1)
+    - Self-auditing termination (Section 2.3)
+    - Error message normalization (Section 4.4)
+    - Context accumulation (Section 1.2)
 
     Args:
         sorry: The sorry location being filled
@@ -61,6 +85,7 @@ async def verify_proof(
         max_attempts: Maximum verification attempts
         project_dir: Lean project directory for lake build
         timeout: Lake build timeout in seconds
+        audit_config: Optional self-auditing configuration
 
     Returns:
         VerificationResult with success status and details
@@ -70,11 +95,33 @@ async def verify_proof(
     current_proof = proof_result.proof_code
     all_errors: list[str] = []
 
+    # Initialize Poetiq self-auditing controller
+    audit_controller = SelfAuditingController(
+        audit_config or AuditConfig(max_iterations=max_attempts)
+    )
+    error_normalizer = ErrorMessageNormalizer()
+
     # Backup original file before any modifications
     backup_path = backup_file(file_path)
 
     try:
         for attempt in range(1, max_attempts + 1):
+            # Poetiq: Check self-audit before each attempt (after first)
+            if attempt > 1:
+                should_continue, stop_reason = audit_controller.should_continue()
+                if not should_continue:
+                    logger.info(f"Early termination at attempt {attempt}: {stop_reason}")
+                    restore_file(file_path, backup_path)
+                    cleanup_backup(backup_path)
+                    return VerificationResult(
+                        success=False,
+                        proof_code=current_proof,
+                        attempts=attempt - 1,
+                        build_output="",
+                        errors=all_errors + [f"Early termination: {stop_reason}"],
+                        elapsed_time=time.time() - start_time,
+                    )
+
             # Replace sorry with current proof
             success = replace_sorry(file_path, sorry, current_proof)
             if not success:
@@ -95,8 +142,15 @@ async def verify_proof(
             if build_result.success:
                 # Check that sorry is actually gone
                 if not file_contains_sorry(file_path):
-                    # Success! Clean up backup and return
+                    # Success! Record successful tactic and clean up
+                    audit_controller.record_attempt(
+                        error=None,
+                        goal_complexity=0,
+                        tactic=current_proof,
+                        success=True,
+                    )
                     cleanup_backup(backup_path)
+                    logger.info(f"Proof verified on attempt {attempt}")
                     return VerificationResult(
                         success=True,
                         proof_code=current_proof,
@@ -115,13 +169,28 @@ async def verify_proof(
             file_errors = filter_errors_for_file(errors, file_path)
             error_summary = extract_error_summary(file_errors or errors)
 
-            all_errors.append(f"Attempt {attempt}: {error_summary}")
+            # Poetiq: Normalize error for LLM and record attempt
+            normalized_error = error_normalizer.normalize(error_summary)
+            goal_complexity = estimate_goal_complexity(error_summary)
+            prompt_tokens = estimate_tokens(current_proof + error_summary)
+
+            audit_controller.record_attempt(
+                error=normalized_error.normalized,
+                goal_complexity=goal_complexity,
+                tokens=prompt_tokens,
+                tactic=current_proof,
+                success=False,
+            )
+
+            all_errors.append(f"Attempt {attempt}: {normalized_error.normalized}")
 
             # Check if we've exhausted attempts
             if attempt >= max_attempts:
                 # Restore original and return failure
                 restore_file(file_path, backup_path)
                 cleanup_backup(backup_path)
+                audit_summary = audit_controller.get_summary()
+                logger.info(f"Max attempts reached. Audit: {audit_summary}")
                 return VerificationResult(
                     success=False,
                     proof_code=current_proof,
@@ -134,15 +203,18 @@ async def verify_proof(
             # Restore file before regenerating (need original sorry for context)
             restore_file(file_path, backup_path)
 
-            # Regenerate proof with error feedback
+            # Regenerate proof with error feedback and tactic history
             new_proof = await _regenerate_with_feedback(
                 sorry=sorry,
                 file_path=file_path,
                 prev_proof=current_proof,
-                error=error_summary,
+                error=normalized_error.normalized,
                 attempt=attempt + 1,
                 model=proof_result.model_used,
                 rag=rag,
+                suggestion=normalized_error.suggestion,
+                successful_tactics=audit_controller.state.successful_tactics,
+                failed_tactics=audit_controller.state.failed_tactics,
             )
 
             if new_proof:
@@ -186,18 +258,29 @@ async def _regenerate_with_feedback(
     attempt: int,
     model: str,
     rag=None,
+    suggestion: str = "",
+    successful_tactics: Optional[list[str]] = None,
+    failed_tactics: Optional[list[str]] = None,
 ) -> Optional[str]:
     """
-    Regenerate proof using error feedback.
+    Regenerate proof using error feedback and tactic history.
+
+    Implements Poetiq context accumulation (Section 1.2):
+    - Successful tactics from prior iterations become positive examples
+    - Failed tactics become negative examples ("this didn't work")
+    - Normalized error with suggestion guides the next attempt
 
     Args:
         sorry: The sorry location
         file_path: Path to the Lean file
         prev_proof: Previous proof that failed
-        error: Error summary from failed build
+        error: Normalized error message from failed build
         attempt: Current attempt number (2-4)
         model: LLM model to use
         rag: Optional RAG instance
+        suggestion: LLM-friendly suggestion for fixing the error
+        successful_tactics: Tactics that worked in similar contexts
+        failed_tactics: Tactics that have already failed
 
     Returns:
         New proof code, or None if regeneration fails
@@ -206,7 +289,11 @@ async def _regenerate_with_feedback(
         # Import agent module
         from agent.llm_client import LLMClient
         from agent.prompts import build_retry_prompt, extract_proof_from_response
-        from agent.context_formatter import format_context, format_error_context
+        from agent.context_formatter import (
+            format_context,
+            format_error_context,
+            format_tactic_history,
+        )
         from agent.rag_query import retrieve_context
 
         # Read current file content
@@ -224,7 +311,21 @@ async def _regenerate_with_feedback(
         # Build context with error information
         context = format_context(sorry, file_content, rag_results)
         error_context = format_error_context(prev_proof, error)
-        full_context = f"{context}\n\n{error_context}"
+
+        # Poetiq: Add tactic history for context accumulation
+        tactic_history = format_tactic_history(
+            successful_tactics or [],
+            failed_tactics or [],
+        )
+
+        # Combine all context sections
+        context_parts = [context, error_context]
+        if tactic_history:
+            context_parts.append(tactic_history)
+        if suggestion:
+            context_parts.append(f"## Suggestion\n\n{suggestion}")
+
+        full_context = "\n\n".join(context_parts)
 
         # Build retry prompt with attempt-specific guidance
         prompt = build_retry_prompt(sorry, full_context, prev_proof, error, attempt)
@@ -233,7 +334,7 @@ async def _regenerate_with_feedback(
         client = LLMClient()
 
         # Adjust temperature based on attempt
-        # Later attempts use higher temperature for diversity
+        # Later attempts use higher temperature for diversity (Poetiq pattern)
         temperature = 0.3 + (attempt - 1) * 0.15  # 0.3, 0.45, 0.6, 0.75
 
         response = await client.generate(
@@ -244,7 +345,8 @@ async def _regenerate_with_feedback(
 
         return extract_proof_from_response(response)
 
-    except Exception:
+    except Exception as e:
+        logger.warning(f"Failed to regenerate proof: {e}")
         return None
 
 

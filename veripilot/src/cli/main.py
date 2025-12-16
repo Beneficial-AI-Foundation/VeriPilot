@@ -99,6 +99,108 @@ def get_lean_file_path() -> str:
         return str(expanded.resolve())
 
 
+def select_sorry_lines(sorries: list[SorryLocation]) -> list[SorryLocation]:
+    """
+    Interactive menu to select which sorries to solve.
+
+    Args:
+        sorries: List of all sorry locations found in file
+
+    Returns:
+        Filtered list of sorries to process
+    """
+    if not sorries:
+        return []
+
+    console.print(f"\n[bold]Found {len(sorries)} sorry location(s):[/bold]\n")
+
+    # Display table of all sorries
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("Index", style="cyan", width=6)
+    table.add_column("Line", style="yellow", width=6)
+    table.add_column("Theorem", style="white")
+    table.add_column("Preview", style="dim")
+
+    for i, sorry in enumerate(sorries, 1):
+        preview = sorry.theorem_signature[:40] if sorry.theorem_signature else "(unknown signature)"
+        if len(preview) == 40:
+            preview += "..."
+        table.add_row(
+            f"[{i}]",
+            str(sorry.line),
+            sorry.theorem_name or "(unnamed)",
+            preview,
+        )
+
+    console.print(table)
+    console.print()
+
+    # Selection menu
+    console.print("[bold]Select which sorries to solve:[/bold]")
+    console.print("  [cyan][A][/cyan] All sorries (default)")
+    console.print("  [cyan][S][/cyan] Select specific indices (e.g., 1,3,5)")
+    console.print("  [cyan][R][/cyan] Select by line range (e.g., 21-56)")
+    console.print()
+
+    choice = Prompt.ask("Enter choice", default="A").strip().upper()
+
+    if choice == "A" or not choice:
+        console.print(f"[green]Selected:[/green] All {len(sorries)} sorries\n")
+        return sorries
+
+    elif choice == "S":
+        console.print("\n[dim]Enter indices separated by commas (e.g., 1,3,5)[/dim]")
+        indices_str = Prompt.ask("Indices")
+
+        try:
+            indices = [int(x.strip()) for x in indices_str.split(",")]
+            selected = [sorries[i - 1] for i in indices if 1 <= i <= len(sorries)]
+
+            if not selected:
+                console.print("[yellow]No valid indices - using all sorries[/yellow]")
+                return sorries
+
+            console.print(f"[green]Selected:[/green] {len(selected)} sorry location(s)\n")
+            return selected
+
+        except (ValueError, IndexError) as e:
+            console.print(f"[red]Invalid input:[/red] {e}")
+            console.print("[yellow]Using all sorries[/yellow]\n")
+            return sorries
+
+    elif choice == "R":
+        console.print("\n[dim]Enter line range (e.g., 21-56 to solve sorries on lines 21 through 56)[/dim]")
+        range_str = Prompt.ask("Line range")
+
+        try:
+            start, end = range_str.split("-")
+            start_line = int(start.strip())
+            end_line = int(end.strip())
+
+            # Filter sorries within the line range
+            selected = [s for s in sorries if start_line <= s.line <= end_line]
+
+            if not selected:
+                console.print(f"[yellow]No sorries found in line range {start_line}-{end_line}[/yellow]")
+                console.print("[yellow]Using all sorries[/yellow]\n")
+                return sorries
+
+            console.print(f"[green]Selected:[/green] {len(selected)} sorry location(s) in lines {start_line}-{end_line}\n")
+            for s in selected:
+                console.print(f"  [dim]Line {s.line}: {s.theorem_name or '(unnamed)'}[/dim]")
+            console.print()
+            return selected
+
+        except (ValueError, IndexError) as e:
+            console.print(f"[red]Invalid range:[/red] {e}")
+            console.print("[yellow]Using all sorries[/yellow]\n")
+            return sorries
+
+    else:
+        console.print(f"[yellow]Unknown choice '{choice}' - using all sorries[/yellow]\n")
+        return sorries
+
+
 def select_mode() -> tuple[int, Optional[str], Optional[str]]:
     """
     Select verification mode.
@@ -174,16 +276,21 @@ async def run_verification(
     # Parse the Lean file
     console.print("\n[dim]Parsing Lean file...[/dim]")
     try:
-        sorries = find_sorries(file_path)
+        all_sorries = find_sorries(file_path)
     except Exception as e:
         console.print(f"[red]Parse error:[/red] {e}")
         return
 
-    if not sorries:
+    if not all_sorries:
         console.print("[green]No sorries found in file![/green]")
         return
 
-    console.print(f"[dim]Found {len(sorries)} sorry location(s)[/dim]")
+    # Let user select which sorries to solve
+    sorries = select_sorry_lines(all_sorries)
+
+    if not sorries:
+        console.print("[yellow]No sorries selected - nothing to do.[/yellow]")
+        return
 
     # Read file content
     with open(file_path) as f:
