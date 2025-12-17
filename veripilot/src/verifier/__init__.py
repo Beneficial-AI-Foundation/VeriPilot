@@ -70,12 +70,18 @@ __all__ = [
     "BuildResult",
     "AttemptLog",
     "verify_proof",
+    "verify_proof_lsp",
     "run_lake_build",
     "parse_lean_errors",
     "create_attempt_copy",
     "cleanup_intermediate_attempts",
     "write_attempt_log",
     "read_attempt_log",
+    # LSP verification (Phase 7.3)
+    "LeanMCPClient",
+    "LeanLSPVerifier",
+    "VerifierService",
+    "verify_proof_instant",
 ]
 
 
@@ -96,8 +102,24 @@ def __getattr__(name: str):
     """Lazy loading of submodule functions."""
     if name == "verify_proof":
         return _get_verify_proof()
+    elif name == "verify_proof_lsp":
+        from .retry_handler import verify_proof_lsp
+        return verify_proof_lsp
     elif name == "run_lake_build":
         return _get_run_lake_build()
     elif name == "parse_lean_errors":
         return _get_parse_lean_errors()
+    # LSP verification (Phase 7.3)
+    elif name == "LeanMCPClient":
+        from .mcp_client import LeanMCPClient
+        return LeanMCPClient
+    elif name == "LeanLSPVerifier":
+        from .lsp_verifier import LeanLSPVerifier
+        return LeanLSPVerifier
+    elif name == "VerifierService":
+        from .verifier_service import VerifierService
+        return VerifierService
+    elif name == "verify_proof_instant":
+        from .verifier_service import verify_proof_instant
+        return verify_proof_instant
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

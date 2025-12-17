@@ -46,6 +46,7 @@ from .error_normalizer import ErrorMessageNormalizer, format_error_for_prompt
 if TYPE_CHECKING:
     from parser import SorryLocation
     from agent import ProofResult
+    from .verifier_service import VerifierService
 
 logger = logging.getLogger(__name__)
 
@@ -271,6 +272,7 @@ async def verify_proof(
                 suggestion=normalized_error.suggestion,
                 successful_tactics=audit_controller.state.successful_tactics,
                 failed_tactics=audit_controller.state.failed_tactics,
+                project_dir=project_dir,
             )
 
             if new_proof:
@@ -330,6 +332,7 @@ async def _regenerate_with_feedback(
     suggestion: str = "",
     successful_tactics: Optional[list[str]] = None,
     failed_tactics: Optional[list[str]] = None,
+    project_dir: Optional[str] = None,
 ) -> Optional[str]:
     """
     Regenerate proof using error feedback and tactic history.
@@ -378,9 +381,9 @@ async def _regenerate_with_feedback(
             except Exception:
                 pass
 
-        # Build context with error information
-        context = format_context(sorry, file_content, rag_results)
-        error_context = format_error_context(prev_proof, error)
+        # Build context with error information (include imports if project_dir available)
+        context = format_context(sorry, file_content, rag_results, project_dir=project_dir)
+        error_context = format_error_context(error, prev_proof)
 
         # Poetiq: Add tactic history for context accumulation
         tactic_history = format_tactic_history(
@@ -419,6 +422,212 @@ async def _regenerate_with_feedback(
     except Exception as e:
         logger.warning(f"Failed to regenerate proof: {e}")
         return None
+
+
+async def verify_proof_lsp(
+    sorry: "SorryLocation",
+    proof_result: "ProofResult",
+    verifier_service: "VerifierService",
+    rag=None,
+    max_attempts: int = 4,
+    audit_config: Optional[AuditConfig] = None,
+) -> VerificationResult:
+    """
+    Verify a proof using LSP (instant feedback, no file overwriting).
+
+    CRITICAL: This function NEVER modifies the original file.
+    All work is done on _VPN.lean copies.
+
+    Uses VerifierService which:
+    - Provides instant feedback via MCP lean-lsp (~10ms when warm)
+    - Falls back to lake build if MCP not ready
+
+    Args:
+        sorry: The sorry location being filled
+        proof_result: Initial proof from agent
+        verifier_service: VerifierService instance (should be started)
+        rag: Optional LeanRAG instance for regeneration
+        max_attempts: Maximum verification attempts
+        audit_config: Optional self-auditing configuration
+
+    Returns:
+        VerificationResult with success status and details
+    """
+    from .verifier_service import VerifierService
+
+    start_time = time.time()
+    file_path = str(sorry.file_path)
+    current_proof = proof_result.proof_code
+    all_errors: list[str] = []
+    attempt_logs: list[AttemptLog] = []
+
+    # Initialize Poetiq self-auditing controller
+    audit_controller = SelfAuditingController(
+        audit_config or AuditConfig(max_iterations=max_attempts)
+    )
+    error_normalizer = ErrorMessageNormalizer()
+
+    try:
+        for attempt in range(1, max_attempts + 1):
+            # Poetiq: Check self-audit before each attempt (after first)
+            if attempt > 1:
+                should_continue, stop_reason = audit_controller.should_continue()
+                if not should_continue:
+                    logger.info(f"Early termination at attempt {attempt}: {stop_reason}")
+
+                    # Keep the last attempt file
+                    last_copy = create_attempt_copy(file_path, attempt - 1)
+                    log_file = write_attempt_log(file_path, attempt_logs, format="json")
+
+                    return VerificationResult(
+                        success=False,
+                        proof_code=current_proof,
+                        attempts=attempt - 1,
+                        build_output="",
+                        errors=all_errors + [f"Early termination: {stop_reason}"],
+                        elapsed_time=time.time() - start_time,
+                        output_file=last_copy,
+                        log_file=log_file,
+                    )
+
+            # Verify on copy (NEVER touches original!)
+            success, errors, copy_path = await verifier_service.verify_proof_on_copy(
+                sorry=sorry,
+                proof_code=current_proof,
+                attempt=attempt,
+                model_used=proof_result.model_used,
+                temperature=proof_result.temperature,
+            )
+
+            if success:
+                # Record successful tactic
+                audit_controller.record_attempt(
+                    error=None,
+                    goal_complexity=0,
+                    tactic=current_proof,
+                    success=True,
+                )
+
+                # Log this successful attempt
+                attempt_logs.append(AttemptLog.create(
+                    attempt=attempt,
+                    proof_code=current_proof,
+                    build_success=True,
+                    errors=[],
+                    elapsed_time=time.time() - start_time,
+                    model_used=proof_result.model_used,
+                    temperature=proof_result.temperature,
+                ))
+
+                # Write attempt log
+                log_file = write_attempt_log(file_path, attempt_logs, format="json")
+
+                # Cleanup intermediate attempts (keep only successful one)
+                if attempt > 1:
+                    cleanup_intermediate_attempts(file_path, attempt)
+
+                method = verifier_service.status.last_verification_method
+                logger.info(f"Proof verified on attempt {attempt} via {method}")
+                return VerificationResult(
+                    success=True,
+                    proof_code=current_proof,
+                    attempts=attempt,
+                    build_output=f"Verified via {method}",
+                    elapsed_time=time.time() - start_time,
+                    output_file=copy_path,
+                    log_file=log_file,
+                )
+
+            # Failed - normalize errors
+            error_summary = "\n".join(errors[:3]) if errors else "Unknown error"
+            normalized_error = error_normalizer.normalize(error_summary)
+            goal_complexity = estimate_goal_complexity(error_summary)
+            prompt_tokens = estimate_tokens(current_proof + error_summary)
+
+            audit_controller.record_attempt(
+                error=normalized_error.normalized,
+                goal_complexity=goal_complexity,
+                tokens=prompt_tokens,
+                tactic=current_proof,
+                success=False,
+            )
+
+            # Log this failed attempt
+            attempt_logs.append(AttemptLog.create(
+                attempt=attempt,
+                proof_code=current_proof,
+                build_success=False,
+                errors=[normalized_error.normalized],
+                elapsed_time=time.time() - start_time,
+                model_used=proof_result.model_used,
+                temperature=proof_result.temperature,
+            ))
+
+            all_errors.append(f"Attempt {attempt}: {normalized_error.normalized}")
+
+            # Check if we've exhausted attempts
+            if attempt >= max_attempts:
+                log_file = write_attempt_log(file_path, attempt_logs, format="json")
+                audit_summary = audit_controller.get_summary()
+                logger.info(f"Max attempts reached. Audit: {audit_summary}")
+                return VerificationResult(
+                    success=False,
+                    proof_code=current_proof,
+                    attempts=attempt,
+                    build_output="",
+                    errors=all_errors,
+                    elapsed_time=time.time() - start_time,
+                    output_file=copy_path,
+                    log_file=log_file,
+                )
+
+            # Regenerate proof with error feedback (use original file for context)
+            new_proof = await _regenerate_with_feedback(
+                sorry=sorry,
+                file_path=file_path,  # Read original for context
+                prev_proof=current_proof,
+                error=normalized_error.normalized,
+                attempt=attempt + 1,
+                model=proof_result.model_used,
+                base_temperature=proof_result.temperature,
+                rag=rag,
+                suggestion=normalized_error.suggestion,
+                successful_tactics=audit_controller.state.successful_tactics,
+                failed_tactics=audit_controller.state.failed_tactics,
+                project_dir=verifier_service.project_dir,
+            )
+
+            if new_proof:
+                current_proof = new_proof
+
+        # Should not reach here
+        log_file = write_attempt_log(file_path, attempt_logs, format="json") if attempt_logs else None
+        return VerificationResult(
+            success=False,
+            proof_code=current_proof,
+            attempts=max_attempts,
+            build_output="",
+            errors=all_errors or ["Max attempts reached"],
+            elapsed_time=time.time() - start_time,
+            log_file=log_file,
+        )
+
+    except Exception as e:
+        log_file = None
+        try:
+            if attempt_logs:
+                log_file = write_attempt_log(file_path, attempt_logs, format="json")
+        except Exception:
+            pass
+        return VerificationResult(
+            success=False,
+            proof_code=current_proof,
+            attempts=len(attempt_logs) if attempt_logs else 1,
+            build_output="",
+            errors=[f"Exception during verification: {e}"],
+            elapsed_time=time.time() - start_time,
+            log_file=log_file,
+        )
 
 
 async def verify_single_sorry(

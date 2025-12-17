@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from agent.llm_client import PROVIDERS, LLMClient, generate_proof
 from agent.user_context import load_user_context
 from parser import find_sorries, SorryLocation
-from verifier import verify_proof
+from verifier import verify_proof, verify_proof_lsp, VerifierService
 from rag.lean.llamaindex_lean import LeanRAG
 
 app = typer.Typer(
@@ -335,19 +335,40 @@ async def run_verification(
     temperature: float = 0.2,
     context_path: Optional[str] = None,
     custom_prompt: Optional[str] = None,
+    use_lsp: bool = True,
 ):
-    """Run the verification process with lake build verification."""
+    """
+    Run the verification process.
+
+    Args:
+        file_path: Path to Lean file
+        model: LLM model to use
+        temperature: Temperature for proof generation
+        context_path: Optional context file path
+        custom_prompt: Optional custom prompt
+        use_lsp: Use LSP for instant verification (default True)
+    """
     console.print(f"\n[bold cyan]Verifying:[/bold cyan] {Path(file_path).name}")
     console.print(f"[bold cyan]Model:[/bold cyan] {PROVIDERS[model].name}")
     console.print(f"[bold cyan]Temperature:[/bold cyan] {temperature}")
 
-    # Find project root for lake build
+    # Find project root
     project_dir = find_lean_project_root(file_path)
     if not project_dir:
         console.print("[red]Error:[/red] Could not find Lean project root (lakefile.lean or lakefile.toml)")
         console.print("[dim]Make sure the file is inside a Lean project directory[/dim]")
         return
     console.print(f"[bold cyan]Project:[/bold cyan] {Path(project_dir).name}")
+
+    # Initialize VerifierService with MCP warm-up in background
+    verifier_service = None
+    if use_lsp:
+        console.print("[dim]Starting LSP verifier (warming up in background)...[/dim]")
+        verifier_service = VerifierService(project_dir)
+        await verifier_service.start()
+        console.print("[bold cyan]Verifier:[/bold cyan] LSP (MCP lean-lsp) with lake build fallback")
+    else:
+        console.print("[bold cyan]Verifier:[/bold cyan] lake build")
 
     # Initialize RAG for context retrieval
     rag = None
@@ -378,10 +399,14 @@ async def run_verification(
         all_sorries = find_sorries(file_path)
     except Exception as e:
         console.print(f"[red]Parse error:[/red] {e}")
+        if verifier_service:
+            await verifier_service.stop()
         return
 
     if not all_sorries:
         console.print("[green]No sorries found in file![/green]")
+        if verifier_service:
+            await verifier_service.stop()
         return
 
     # Let user select which sorries to solve
@@ -389,6 +414,8 @@ async def run_verification(
 
     if not sorries:
         console.print("[yellow]No sorries selected - nothing to do.[/yellow]")
+        if verifier_service:
+            await verifier_service.stop()
         return
 
     # Read file content for proof generation
@@ -399,76 +426,95 @@ async def run_verification(
     verified_proofs = []
     failed_proofs = []
 
-    # Process each sorry
-    for i, sorry in enumerate(sorries, 1):
-        console.print(f"\n[bold]Processing sorry {i}/{len(sorries)}:[/bold]")
-        console.print(f"  [dim]Theorem:[/dim] {sorry.theorem_name}")
-        console.print(f"  [dim]Line:[/dim] {sorry.line}")
+    try:
+        # Process each sorry
+        for i, sorry in enumerate(sorries, 1):
+            console.print(f"\n[bold]Processing sorry {i}/{len(sorries)}:[/bold]")
+            console.print(f"  [dim]Theorem:[/dim] {sorry.theorem_name}")
+            console.print(f"  [dim]Line:[/dim] {sorry.line}")
 
-        try:
-            # Step 1: Generate initial proof
-            console.print("  [dim]Generating initial proof...[/dim]")
-            initial_result = await generate_proof(
-                sorry=sorry,
-                file_content=file_content,
-                rag=rag,
-                model=model,
-                temperature=temperature,
-            )
+            try:
+                # Step 1: Generate initial proof
+                console.print("  [dim]Generating initial proof...[/dim]")
+                initial_result = await generate_proof(
+                    sorry=sorry,
+                    file_content=file_content,
+                    rag=rag,
+                    model=model,
+                    temperature=temperature,
+                )
 
-            if not initial_result.success or not initial_result.proof_code:
-                console.print(f"  [red]Failed to generate proof:[/red] {initial_result.error or 'Unknown error'}")
-                failed_proofs.append((sorry.theorem_name, "Generation failed"))
-                continue
+                if not initial_result.success or not initial_result.proof_code:
+                    console.print(f"  [red]Failed to generate proof:[/red] {initial_result.error or 'Unknown error'}")
+                    failed_proofs.append((sorry.theorem_name, "Generation failed"))
+                    continue
 
-            console.print(f"  [dim]Initial proof generated, verifying with lake build...[/dim]")
+                # Step 2: Verify with retry loop
+                if verifier_service and use_lsp:
+                    # Use LSP verification (instant, never modifies original)
+                    mcp_status = "warm" if verifier_service.status.mcp_available else "warming up"
+                    console.print(f"  [dim]Verifying via LSP ({mcp_status})...[/dim]")
+                    verification = await verify_proof_lsp(
+                        sorry=sorry,
+                        proof_result=initial_result,
+                        verifier_service=verifier_service,
+                        rag=rag,
+                        max_attempts=MAX_ATTEMPTS,
+                    )
+                else:
+                    # Fall back to lake build verification
+                    console.print("  [dim]Verifying with lake build...[/dim]")
+                    verification = await verify_proof(
+                        sorry=sorry,
+                        proof_result=initial_result,
+                        rag=rag,
+                        project_dir=project_dir,
+                        max_attempts=MAX_ATTEMPTS,
+                    )
 
-            # Step 2: Verify with lake build + retry loop
-            verification = await verify_proof(
-                sorry=sorry,
-                proof_result=initial_result,
-                rag=rag,
-                project_dir=project_dir,
-                max_attempts=MAX_ATTEMPTS,
-            )
+                # Show result
+                if verification.success:
+                    method = verification.build_output.split()[2] if "via" in verification.build_output else "lake"
+                    console.print(f"  [green]✓ Verified on attempt {verification.attempts}![/green]")
+                    console.print(f"  [dim]Proof:[/dim]")
+                    for line in verification.proof_code.split("\n")[:5]:
+                        console.print(f"    {line}")
+                    if verification.proof_code.count("\n") > 5:
+                        console.print(f"    [dim]... ({verification.proof_code.count(chr(10)) - 5} more lines)[/dim]")
 
-            # Show result
-            if verification.success:
-                console.print(f"  [green]✓ Verified on attempt {verification.attempts}![/green]")
-                console.print(f"  [dim]Proof:[/dim]")
-                for line in verification.proof_code.split("\n")[:5]:
-                    console.print(f"    {line}")
-                if verification.proof_code.count("\n") > 5:
-                    console.print(f"    [dim]... ({verification.proof_code.count(chr(10)) - 5} more lines)[/dim]")
+                    if verification.output_file:
+                        console.print(f"  [green]Output:[/green] {Path(verification.output_file).name}")
+                    verified_proofs.append((sorry.theorem_name, verification.attempts, verification.output_file))
+                else:
+                    console.print(f"  [red]✗ Failed after {verification.attempts} attempt(s)[/red]")
+                    if verification.errors:
+                        console.print(f"  [dim]Last error:[/dim] {verification.errors[-1][:100]}")
+                    if verification.output_file:
+                        console.print(f"  [yellow]Final attempt:[/yellow] {Path(verification.output_file).name}")
+                    failed_proofs.append((sorry.theorem_name, f"Failed after {verification.attempts} attempts"))
 
-                if verification.output_file:
-                    console.print(f"  [green]Output:[/green] {Path(verification.output_file).name}")
-                verified_proofs.append((sorry.theorem_name, verification.attempts, verification.output_file))
-            else:
-                console.print(f"  [red]✗ Failed after {verification.attempts} attempt(s)[/red]")
-                if verification.errors:
-                    console.print(f"  [dim]Last error:[/dim] {verification.errors[-1][:100]}")
-                if verification.output_file:
-                    console.print(f"  [yellow]Final attempt:[/yellow] {Path(verification.output_file).name}")
-                failed_proofs.append((sorry.theorem_name, f"Failed after {verification.attempts} attempts"))
+                # Show log file location
+                if verification.log_file:
+                    console.print(f"  [dim]Log:[/dim] {Path(verification.log_file).name}")
 
-            # Show log file location
-            if verification.log_file:
-                console.print(f"  [dim]Log:[/dim] {Path(verification.log_file).name}")
-
-        except ValueError as e:
-            # API key or configuration errors - fatal, exit immediately
-            error_msg = str(e)
-            if "API_KEY" in error_msg:
-                console.print(f"\n[red bold]Configuration Error:[/red bold] {error_msg}")
-                console.print("[yellow]Check your .env file and ensure the API key is set.[/yellow]")
-                raise typer.Exit(1)
-            else:
+            except ValueError as e:
+                # API key or configuration errors - fatal, exit immediately
+                error_msg = str(e)
+                if "API_KEY" in error_msg:
+                    console.print(f"\n[red bold]Configuration Error:[/red bold] {error_msg}")
+                    console.print("[yellow]Check your .env file and ensure the API key is set.[/yellow]")
+                    raise typer.Exit(1)
+                else:
+                    console.print(f"  [red]Error:[/red] {e}")
+                    failed_proofs.append((sorry.theorem_name, str(e)))
+            except Exception as e:
                 console.print(f"  [red]Error:[/red] {e}")
                 failed_proofs.append((sorry.theorem_name, str(e)))
-        except Exception as e:
-            console.print(f"  [red]Error:[/red] {e}")
-            failed_proofs.append((sorry.theorem_name, str(e)))
+
+    finally:
+        # Clean up verifier service
+        if verifier_service:
+            await verifier_service.stop()
 
     # Summary
     console.print("\n" + "─" * 50)
