@@ -26,22 +26,11 @@ class TestLoadPrompt:
         """Clear cache before each test."""
         clear_cache()
 
-    def test_load_system_prompt_default(self):
-        """Test loading the default system prompt."""
-        prompt = load_prompt("system_prompt")
+    def test_load_system_prompt_latest(self):
+        """Test loading the universal system prompt (latest version)."""
+        prompt = load_latest_prompt("system_prompt")
         assert "Lean 4" in prompt
         assert "sorry" in prompt
-
-    def test_load_system_prompt_gemini(self):
-        """Test loading Gemini-specific system prompt."""
-        prompt = load_prompt("system_prompt_gemini")
-        assert "Lean 4" in prompt
-        assert "tactic" in prompt.lower()
-
-    def test_load_system_prompt_claude(self):
-        """Test loading Claude-specific system prompt."""
-        prompt = load_prompt("system_prompt_claude")
-        assert "Lean 4" in prompt
 
     def test_load_retry_guidance(self):
         """Test loading retry guidance prompt."""
@@ -55,10 +44,10 @@ class TestLoadPrompt:
             load_prompt("nonexistent_prompt_xyz")
 
     def test_load_prompt_caching(self):
-        """Test that prompts are cached."""
-        # Load twice
-        prompt1 = load_prompt("system_prompt")
-        prompt2 = load_prompt("system_prompt")
+        """Test that prompts are cached via load_latest_prompt."""
+        # load_latest_prompt internally calls load_prompt which is cached
+        prompt1 = load_latest_prompt("system_prompt")
+        prompt2 = load_latest_prompt("system_prompt")
 
         # Should be same object due to caching
         assert prompt1 is prompt2
@@ -86,8 +75,8 @@ class TestListPrompts:
         """Test listing prompts in verifier category."""
         prompts = list_prompts("verifier")
         assert "system_prompt" in prompts
-        assert "system_prompt_gemini" in prompts
-        assert "system_prompt_claude" in prompts
+        # Model-specific prompts moved to legacy/, only universal prompt remains
+        assert "retry_guidance" in prompts
 
     def test_list_prompts_nonexistent_category(self):
         """Test listing prompts in nonexistent category returns empty."""

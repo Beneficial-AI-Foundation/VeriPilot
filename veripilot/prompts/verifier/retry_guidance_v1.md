@@ -3,7 +3,7 @@
 ## Attempt 2 Guidance
 - Try simpler tactics first
 - Check lemma names carefully
-- Consider using `decide` for simple propositions
+- Consider using `aesop` for simple propositions
 
 ## Attempt 3 Guidance
 - Try a completely different approach

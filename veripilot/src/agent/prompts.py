@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 # Try to import prompt loader
 try:
-    from .prompt_loader import load_prompt
+    from .prompt_loader import load_prompt, load_latest_prompt
     PROMPT_LOADER_AVAILABLE = True
 except ImportError:
     PROMPT_LOADER_AVAILABLE = False
@@ -64,13 +64,19 @@ Requirements:
 - No axioms"""
 
 
-def _load_prompt_safe(name: str) -> Optional[str]:
+def _load_prompt_safe(name: str, use_latest: bool = False) -> Optional[str]:
     """
     Safely load a prompt from file, returning None on failure.
+
+    Args:
+        name: Prompt name (without version suffix)
+        use_latest: If True, use load_latest_prompt to get highest version
     """
     if not PROMPT_LOADER_AVAILABLE:
         return None
     try:
+        if use_latest:
+            return load_latest_prompt(name)
         return load_prompt(name)
     except FileNotFoundError:
         logger.debug(f"Prompt file not found: {name}, using fallback")
@@ -82,13 +88,15 @@ def _load_prompt_safe(name: str) -> Optional[str]:
 
 def build_system_prompt(model: str = "default") -> str:
     """
-    Build the system prompt for a specific model.
+    Build the system prompt for proof generation.
 
-    Attempts to load from prompts/verifier/system_prompt_{model}_v1.md first,
-    then falls back to hardcoded prompts.
+    Loads the latest version of system_prompt from prompts/verifier/.
+    All models use the same universal prompt (system_prompt_v2.md or higher).
 
     Args:
         model: Model identifier (gemini, claude, aristotle, default)
+              Note: Model-specific prompts are deprecated. All models now use
+              the same universal prompt. See prompts/verifier/README.md.
 
     Returns:
         System prompt string
@@ -97,23 +105,14 @@ def build_system_prompt(model: str = "default") -> str:
     if model == "aristotle":
         return ""
 
-    # Try to load from file first
-    if model in ("gemini", "claude"):
-        loaded = _load_prompt_safe(f"system_prompt_{model}")
-        if loaded:
-            return loaded
-    else:
-        loaded = _load_prompt_safe("system_prompt")
-        if loaded:
-            return loaded
+    # Load latest universal prompt (e.g., system_prompt_v2.md)
+    loaded = _load_prompt_safe("system_prompt", use_latest=True)
+    if loaded:
+        return loaded
 
-    # Fall back to hardcoded prompts
-    prompts = {
-        "gemini": SYSTEM_PROMPT_GEMINI,
-        "claude": SYSTEM_PROMPT_CLAUDE,
-        "default": SYSTEM_PROMPT_DEFAULT,
-    }
-    return prompts.get(model, SYSTEM_PROMPT_DEFAULT)
+    # Fall back to hardcoded default if file loading fails
+    logger.warning("Could not load system_prompt from file, using hardcoded fallback")
+    return SYSTEM_PROMPT_DEFAULT
 
 
 def build_user_prompt(
