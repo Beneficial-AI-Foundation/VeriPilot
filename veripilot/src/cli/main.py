@@ -6,6 +6,7 @@ Provides model selection, file input, and context configuration through interact
 """
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -15,6 +16,10 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt, IntPrompt, Confirm
 from rich.table import Table
+from dotenv import load_dotenv
+
+# Load .env file for API keys
+load_dotenv()
 
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -22,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from agent.llm_client import PROVIDERS, LLMClient, generate_proof, generate_with_aristotle
 from agent.user_context import load_user_context
 from parser import find_sorries, SorryLocation
+from verifier import verify_proof
 
 app = typer.Typer(
     name="veripilot",
@@ -39,6 +45,26 @@ MODEL_OPTIONS = [
     ("claude-opus", "Claude Opus 4.5", "Via Anthropic API - highest quality"),
     ("aristotle", "Aristotle", "Lean specialist - file-based API"),
 ]
+
+# Default max verification attempts
+MAX_ATTEMPTS = 4
+
+
+def find_lean_project_root(file_path: str) -> Optional[str]:
+    """
+    Find the Lean project root by walking up from file to find lakefile.lean or lakefile.toml.
+
+    Args:
+        file_path: Path to a Lean file
+
+    Returns:
+        Path to project root directory, or None if not found
+    """
+    path = Path(file_path).resolve()
+    for parent in [path.parent] + list(path.parents):
+        if (parent / "lakefile.lean").exists() or (parent / "lakefile.toml").exists():
+            return str(parent)
+    return None
 
 
 def display_banner():
@@ -257,9 +283,17 @@ async def run_verification(
     context_path: Optional[str] = None,
     custom_prompt: Optional[str] = None,
 ):
-    """Run the verification process."""
+    """Run the verification process with lake build verification."""
     console.print(f"\n[bold cyan]Verifying:[/bold cyan] {Path(file_path).name}")
     console.print(f"[bold cyan]Model:[/bold cyan] {PROVIDERS[model].name}")
+
+    # Find project root for lake build
+    project_dir = find_lean_project_root(file_path)
+    if not project_dir:
+        console.print("[red]Error:[/red] Could not find Lean project root (lakefile.lean or lakefile.toml)")
+        console.print("[dim]Make sure the file is inside a Lean project directory[/dim]")
+        return
+    console.print(f"[bold cyan]Project:[/bold cyan] {Path(project_dir).name}")
 
     # Load user context if provided
     user_context = None
@@ -292,9 +326,13 @@ async def run_verification(
         console.print("[yellow]No sorries selected - nothing to do.[/yellow]")
         return
 
-    # Read file content
+    # Read file content for proof generation
     with open(file_path) as f:
         file_content = f.read()
+
+    # Track results
+    verified_proofs = []
+    failed_proofs = []
 
     # Process each sorry
     for i, sorry in enumerate(sorries, 1):
@@ -302,37 +340,94 @@ async def run_verification(
         console.print(f"  [dim]Theorem:[/dim] {sorry.theorem_name}")
         console.print(f"  [dim]Line:[/dim] {sorry.line}")
 
-        with console.status("[bold green]Generating proof..."):
-            try:
-                result = await generate_proof(
-                    sorry=sorry,
-                    file_content=file_content,
-                    model=model,
-                )
+        try:
+            # Step 1: Generate initial proof
+            console.print("  [dim]Generating initial proof...[/dim]")
+            initial_result = await generate_proof(
+                sorry=sorry,
+                file_content=file_content,
+                model=model,
+            )
 
-                if result.success and result.proof_code:
-                    console.print(f"  [green]Success![/green]")
-                    console.print(f"  [dim]Proof:[/dim]")
-                    for line in result.proof_code.split("\n")[:5]:  # First 5 lines
-                        console.print(f"    {line}")
-                    if result.proof_code.count("\n") > 5:
-                        console.print(f"    [dim]... ({result.proof_code.count(chr(10)) - 5} more lines)[/dim]")
-                else:
-                    console.print(f"  [red]Failed:[/red] {result.error or 'Unknown error'}")
+            if not initial_result.success or not initial_result.proof_code:
+                console.print(f"  [red]Failed to generate proof:[/red] {initial_result.error or 'Unknown error'}")
+                failed_proofs.append((sorry.theorem_name, "Generation failed"))
+                continue
 
-            except Exception as e:
+            console.print(f"  [dim]Initial proof generated, verifying with lake build...[/dim]")
+
+            # Step 2: Verify with lake build + retry loop
+            verification = await verify_proof(
+                sorry=sorry,
+                proof_result=initial_result,
+                project_dir=project_dir,
+                max_attempts=MAX_ATTEMPTS,
+            )
+
+            # Show result
+            if verification.success:
+                console.print(f"  [green]✓ Verified on attempt {verification.attempts}![/green]")
+                console.print(f"  [dim]Proof:[/dim]")
+                for line in verification.proof_code.split("\n")[:5]:
+                    console.print(f"    {line}")
+                if verification.proof_code.count("\n") > 5:
+                    console.print(f"    [dim]... ({verification.proof_code.count(chr(10)) - 5} more lines)[/dim]")
+
+                if verification.output_file:
+                    console.print(f"  [green]Output:[/green] {Path(verification.output_file).name}")
+                verified_proofs.append((sorry.theorem_name, verification.attempts, verification.output_file))
+            else:
+                console.print(f"  [red]✗ Failed after {verification.attempts} attempt(s)[/red]")
+                if verification.errors:
+                    console.print(f"  [dim]Last error:[/dim] {verification.errors[-1][:100]}")
+                if verification.output_file:
+                    console.print(f"  [yellow]Final attempt:[/yellow] {Path(verification.output_file).name}")
+                failed_proofs.append((sorry.theorem_name, f"Failed after {verification.attempts} attempts"))
+
+            # Show log file location
+            if verification.log_file:
+                console.print(f"  [dim]Log:[/dim] {Path(verification.log_file).name}")
+
+        except ValueError as e:
+            # API key or configuration errors - fatal, exit immediately
+            error_msg = str(e)
+            if "API_KEY" in error_msg:
+                console.print(f"\n[red bold]Configuration Error:[/red bold] {error_msg}")
+                console.print("[yellow]Check your .env file and ensure the API key is set.[/yellow]")
+                raise typer.Exit(1)
+            else:
                 console.print(f"  [red]Error:[/red] {e}")
+                failed_proofs.append((sorry.theorem_name, str(e)))
+        except Exception as e:
+            console.print(f"  [red]Error:[/red] {e}")
+            failed_proofs.append((sorry.theorem_name, str(e)))
 
-    console.print("\n[bold green]Verification complete![/bold green]")
+    # Summary
+    console.print("\n" + "─" * 50)
+    console.print("[bold]Verification Complete![/bold]")
+    if verified_proofs:
+        console.print(f"[green]✓ {len(verified_proofs)} proof(s) verified successfully[/green]")
+        for name, attempts, output_file in verified_proofs:
+            output_name = Path(output_file).name if output_file else "?"
+            console.print(f"  [dim]{name}:[/dim] {output_name} (attempt {attempts})")
+    if failed_proofs:
+        console.print(f"[red]✗ {len(failed_proofs)} proof(s) failed[/red]")
+        for name, reason in failed_proofs:
+            console.print(f"  [dim]{name}:[/dim] {reason}")
 
 
-@app.command()
-def main():
+@app.callback(invoke_without_command=True)
+def main(ctx: typer.Context):
     """
     VeriPilot Interactive CLI.
 
     Run without arguments for interactive mode with menus.
+    Use subcommands like 'version' or 'models' for specific info.
     """
+    # If a subcommand was invoked, let it handle execution
+    if ctx.invoked_subcommand is not None:
+        return
+
     display_banner()
 
     # Interactive prompts

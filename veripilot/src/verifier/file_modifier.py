@@ -307,17 +307,17 @@ def cleanup_vp_files(vp_path: str):
 
 def create_attempt_copy(original_path: str, attempt: int) -> str:
     """
-    Create VP_N_originalfile.lean for attempt N.
+    Create originalfile_VPN.lean for attempt N.
 
     Args:
         original_path: Path to original .lean file
         attempt: Attempt number (1, 2, 3, ...)
 
     Returns:
-        Path to VP_N_<filename>.lean
+        Path to <filename>_VP<N>.lean (e.g., Invert_VP1.lean)
     """
     original = Path(original_path)
-    vp_name = f"VP_{attempt}_{original.name}"
+    vp_name = f"{original.stem}_VP{attempt}{original.suffix}"
     vp_path = original.parent / vp_name
 
     shutil.copy2(original, vp_path)
@@ -326,7 +326,7 @@ def create_attempt_copy(original_path: str, attempt: int) -> str:
 
 def cleanup_intermediate_attempts(original_path: str, final_attempt: int) -> list[str]:
     """
-    Delete VP_1 through VP_{N-1}, keeping only VP_N.
+    Delete _VP1 through _VP{N-1}, keeping only _VPN.
 
     Args:
         original_path: Original file path
@@ -339,7 +339,7 @@ def cleanup_intermediate_attempts(original_path: str, final_attempt: int) -> lis
     deleted = []
 
     for i in range(1, final_attempt):
-        attempt_path = original.parent / f"VP_{i}_{original.name}"
+        attempt_path = original.parent / f"{original.stem}_VP{i}{original.suffix}"
         if attempt_path.exists():
             attempt_path.unlink()
             deleted.append(str(attempt_path))
@@ -349,7 +349,7 @@ def cleanup_intermediate_attempts(original_path: str, final_attempt: int) -> lis
 
 def cleanup_all_attempt_files(original_path: str, max_attempts: int = 10) -> list[str]:
     """
-    Delete all VP_N_ files for a given original file.
+    Delete all _VPN files for a given original file.
 
     Args:
         original_path: Original file path
@@ -362,13 +362,13 @@ def cleanup_all_attempt_files(original_path: str, max_attempts: int = 10) -> lis
     deleted = []
 
     for i in range(1, max_attempts + 1):
-        attempt_path = original.parent / f"VP_{i}_{original.name}"
+        attempt_path = original.parent / f"{original.stem}_VP{i}{original.suffix}"
         if attempt_path.exists():
             attempt_path.unlink()
             deleted.append(str(attempt_path))
 
-    # Also clean up basic VP_ file
-    basic_vp = original.parent / f"VP_{original.name}"
+    # Also clean up basic _VP file (legacy naming)
+    basic_vp = original.parent / f"{original.stem}_VP{original.suffix}"
     if basic_vp.exists():
         basic_vp.unlink()
         deleted.append(str(basic_vp))

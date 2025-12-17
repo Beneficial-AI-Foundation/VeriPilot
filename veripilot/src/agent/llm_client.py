@@ -53,13 +53,13 @@ PROVIDERS = {
     "claude": ProviderConfig(
         name="Claude Sonnet 4.5",
         client_type="anthropic",
-        model="claude-sonnet-4-5-20241022",
+        model="claude-sonnet-4-5",
         env_key="ANTHROPIC_API_KEY",
     ),
     "claude-opus": ProviderConfig(
         name="Claude Opus 4.5",
         client_type="anthropic",
-        model="claude-opus-4-5-20241022",
+        model="claude-opus-4-5",
         env_key="ANTHROPIC_API_KEY",
     ),
     "aristotle": ProviderConfig(
@@ -190,6 +190,7 @@ class LLMClient:
     ) -> str:
         """Generate using Google GenAI API (direct)."""
         from google.genai import types
+        from google.api_core import exceptions as google_exceptions
         import asyncio
 
         client = self._get_google_client()
@@ -199,15 +200,24 @@ class LLMClient:
 
         # Google GenAI uses synchronous API, run in executor
         def _sync_generate():
-            response = client.models.generate_content(
-                model=provider.model,
-                contents=full_prompt,
-                config=types.GenerateContentConfig(
-                    temperature=temperature,
-                    max_output_tokens=max_tokens,
-                ),
-            )
-            return response.text if response.text else ""
+            try:
+                response = client.models.generate_content(
+                    model=provider.model,
+                    contents=full_prompt,
+                    config=types.GenerateContentConfig(
+                        temperature=temperature,
+                        max_output_tokens=max_tokens,
+                    ),
+                )
+                return response.text if response.text else ""
+            except google_exceptions.NotFound as e:
+                raise ValueError(f"Model '{provider.model}' not found. Check model name or API access.") from e
+            except google_exceptions.PermissionDenied as e:
+                raise ValueError(f"Permission denied for model '{provider.model}'. Check API key or quota.") from e
+            except google_exceptions.ResourceExhausted as e:
+                raise ValueError(f"Quota exceeded for model '{provider.model}'. {str(e)}") from e
+            except google_exceptions.GoogleAPIError as e:
+                raise ValueError(f"Google API error: {str(e)}") from e
 
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _sync_generate)
@@ -244,20 +254,29 @@ class LLMClient:
         max_tokens: int,
     ) -> str:
         """Generate using Anthropic API."""
+        from anthropic import APIError, NotFoundError, AuthenticationError
+
         client = self._get_anthropic_client()
 
-        response = await client.messages.create(
-            model=provider.model,
-            system=system_prompt,
-            messages=[{"role": "user", "content": user_prompt}],
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
+        try:
+            response = await client.messages.create(
+                model=provider.model,
+                system=system_prompt,
+                messages=[{"role": "user", "content": user_prompt}],
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
 
-        # Extract text from response
-        if response.content and len(response.content) > 0:
-            return response.content[0].text
-        return ""
+            # Extract text from response
+            if response.content and len(response.content) > 0:
+                return response.content[0].text
+            return ""
+        except NotFoundError as e:
+            raise ValueError(f"Model '{provider.model}' not found. Check model name in llm_client.py PROVIDERS config.") from e
+        except AuthenticationError as e:
+            raise ValueError(f"ANTHROPIC_API_KEY authentication failed: {str(e)}") from e
+        except APIError as e:
+            raise ValueError(f"Anthropic API error: {str(e)}") from e
 
 
 async def generate_with_aristotle(

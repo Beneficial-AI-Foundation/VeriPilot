@@ -41,6 +41,8 @@ class VerificationResult:
     build_output: str
     errors: list[str] = field(default_factory=list)
     elapsed_time: float = 0.0
+    output_file: Optional[str] = None  # Path to final _VPN.lean file
+    log_file: Optional[str] = None  # Path to VP_log_filename.json
 
 
 # Lazy imports to avoid circular dependencies

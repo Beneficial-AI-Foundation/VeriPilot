@@ -1,7 +1,8 @@
 """
 Tests for attempt logging functionality.
 
-Tests VP_N_ file copies and cumulative log file generation.
+Tests _VPN file copies and cumulative log file generation.
+Uses the new naming convention: filename_VP1.lean, filename_VP2.lean, etc.
 """
 
 import json
@@ -63,7 +64,7 @@ class TestCreateAttemptCopy:
     """Tests for create_attempt_copy function."""
 
     def test_create_attempt_copy(self, tmp_path):
-        """Test creating a VP_N_ copy."""
+        """Test creating a _VPN copy."""
         # Create test file
         test_file = tmp_path / "test.lean"
         test_file.write_text("theorem foo : True := by sorry")
@@ -72,7 +73,7 @@ class TestCreateAttemptCopy:
         copy_path = create_attempt_copy(str(test_file), 1)
 
         assert Path(copy_path).exists()
-        assert Path(copy_path).name == "VP_1_test.lean"
+        assert Path(copy_path).name == "test_VP1.lean"
         assert Path(copy_path).read_text() == "theorem foo : True := by sorry"
 
     def test_create_multiple_attempt_copies(self, tmp_path):
@@ -85,9 +86,9 @@ class TestCreateAttemptCopy:
         copy2 = create_attempt_copy(str(test_file), 2)
         copy3 = create_attempt_copy(str(test_file), 3)
 
-        assert Path(copy1).name == "VP_1_test.lean"
-        assert Path(copy2).name == "VP_2_test.lean"
-        assert Path(copy3).name == "VP_3_test.lean"
+        assert Path(copy1).name == "test_VP1.lean"
+        assert Path(copy2).name == "test_VP2.lean"
+        assert Path(copy3).name == "test_VP3.lean"
 
         # All should exist
         assert Path(copy1).exists()
@@ -113,11 +114,11 @@ class TestCleanupIntermediateAttempts:
 
         # Attempts 1 and 2 should be deleted
         assert len(deleted) == 2
-        assert not (tmp_path / "VP_1_test.lean").exists()
-        assert not (tmp_path / "VP_2_test.lean").exists()
+        assert not (tmp_path / "test_VP1.lean").exists()
+        assert not (tmp_path / "test_VP2.lean").exists()
 
         # Attempt 3 should remain
-        assert (tmp_path / "VP_3_test.lean").exists()
+        assert (tmp_path / "test_VP3.lean").exists()
 
     def test_cleanup_no_files_to_delete(self, tmp_path):
         """Test cleanup when there are no intermediate files."""
@@ -131,7 +132,7 @@ class TestCleanupIntermediateAttempts:
         deleted = cleanup_intermediate_attempts(str(test_file), 1)
 
         assert len(deleted) == 0
-        assert (tmp_path / "VP_1_test.lean").exists()
+        assert (tmp_path / "test_VP1.lean").exists()
 
 
 class TestCleanupAllAttemptFiles:
@@ -147,18 +148,18 @@ class TestCleanupAllAttemptFiles:
         create_attempt_copy(str(test_file), 2)
         create_attempt_copy(str(test_file), 3)
 
-        # Create basic VP_ file too
-        (tmp_path / "VP_test.lean").write_text("vp content")
+        # Create basic _VP file too (legacy naming)
+        (tmp_path / "test_VP.lean").write_text("vp content")
 
         # Cleanup all
         deleted = cleanup_all_attempt_files(str(test_file))
 
         # All should be deleted
         assert len(deleted) == 4
-        assert not (tmp_path / "VP_1_test.lean").exists()
-        assert not (tmp_path / "VP_2_test.lean").exists()
-        assert not (tmp_path / "VP_3_test.lean").exists()
-        assert not (tmp_path / "VP_test.lean").exists()
+        assert not (tmp_path / "test_VP1.lean").exists()
+        assert not (tmp_path / "test_VP2.lean").exists()
+        assert not (tmp_path / "test_VP3.lean").exists()
+        assert not (tmp_path / "test_VP.lean").exists()
 
 
 class TestWriteAttemptLog:

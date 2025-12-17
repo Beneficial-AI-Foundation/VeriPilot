@@ -24,6 +24,10 @@ from .file_modifier import (
     cleanup_backup,
     replace_sorry,
     file_contains_sorry,
+    create_attempt_copy,
+    write_attempt_log,
+    cleanup_intermediate_attempts,
+    AttemptLog,
 )
 from .lake_runner import run_lake_build, get_module_from_file
 from .error_parser import (
@@ -94,6 +98,7 @@ async def verify_proof(
     file_path = str(sorry.file_path)
     current_proof = proof_result.proof_code
     all_errors: list[str] = []
+    attempt_logs: list[AttemptLog] = []  # Track all attempts for logging
 
     # Initialize Poetiq self-auditing controller
     audit_controller = SelfAuditingController(
@@ -111,6 +116,11 @@ async def verify_proof(
                 should_continue, stop_reason = audit_controller.should_continue()
                 if not should_continue:
                     logger.info(f"Early termination at attempt {attempt}: {stop_reason}")
+
+                    # Create output file from last attempted proof
+                    output_file = create_attempt_copy(file_path, attempt - 1)
+                    log_file = write_attempt_log(file_path, attempt_logs, format="json")
+
                     restore_file(file_path, backup_path)
                     cleanup_backup(backup_path)
                     return VerificationResult(
@@ -120,6 +130,8 @@ async def verify_proof(
                         build_output="",
                         errors=all_errors + [f"Early termination: {stop_reason}"],
                         elapsed_time=time.time() - start_time,
+                        output_file=output_file,
+                        log_file=log_file,
                     )
 
             # Replace sorry with current proof
@@ -149,6 +161,27 @@ async def verify_proof(
                         tactic=current_proof,
                         success=True,
                     )
+
+                    # Log this successful attempt
+                    attempt_logs.append(AttemptLog.create(
+                        attempt=attempt,
+                        proof_code=current_proof,
+                        build_success=True,
+                        errors=[],
+                        elapsed_time=time.time() - start_time,
+                        model_used=proof_result.model_used,
+                    ))
+
+                    # Create final attempt copy (e.g., Invert_VP2.lean)
+                    output_file = create_attempt_copy(file_path, attempt)
+
+                    # Write attempt log
+                    log_file = write_attempt_log(file_path, attempt_logs, format="json")
+
+                    # Cleanup intermediate attempts (keep only successful one)
+                    if attempt > 1:
+                        cleanup_intermediate_attempts(file_path, attempt)
+
                     cleanup_backup(backup_path)
                     logger.info(f"Proof verified on attempt {attempt}")
                     return VerificationResult(
@@ -157,6 +190,8 @@ async def verify_proof(
                         attempts=attempt,
                         build_output=build_result.stdout,
                         elapsed_time=time.time() - start_time,
+                        output_file=output_file,
+                        log_file=log_file,
                     )
                 # Build succeeded but sorry still present (shouldn't happen)
                 # Continue to retry
@@ -182,10 +217,26 @@ async def verify_proof(
                 success=False,
             )
 
+            # Log this failed attempt
+            attempt_logs.append(AttemptLog.create(
+                attempt=attempt,
+                proof_code=current_proof,
+                build_success=False,
+                errors=[normalized_error.normalized],
+                elapsed_time=time.time() - start_time,
+                model_used=proof_result.model_used,
+            ))
+
             all_errors.append(f"Attempt {attempt}: {normalized_error.normalized}")
 
             # Check if we've exhausted attempts
             if attempt >= max_attempts:
+                # Create final attempt copy (e.g., Invert_VP4.lean)
+                output_file = create_attempt_copy(file_path, attempt)
+
+                # Write attempt log
+                log_file = write_attempt_log(file_path, attempt_logs, format="json")
+
                 # Restore original and return failure
                 restore_file(file_path, backup_path)
                 cleanup_backup(backup_path)
@@ -198,6 +249,8 @@ async def verify_proof(
                     build_output=combined_output,
                     errors=all_errors,
                     elapsed_time=time.time() - start_time,
+                    output_file=output_file,
+                    log_file=log_file,
                 )
 
             # Restore file before regenerating (need original sorry for context)
@@ -222,6 +275,9 @@ async def verify_proof(
             # else: retry with same proof (maybe transient error)
 
         # Should not reach here, but handle gracefully
+        output_file = create_attempt_copy(file_path, max_attempts) if attempt_logs else None
+        log_file = write_attempt_log(file_path, attempt_logs, format="json") if attempt_logs else None
+
         restore_file(file_path, backup_path)
         cleanup_backup(backup_path)
         return VerificationResult(
@@ -231,11 +287,18 @@ async def verify_proof(
             build_output="",
             errors=all_errors or ["Max attempts reached"],
             elapsed_time=time.time() - start_time,
+            output_file=output_file,
+            log_file=log_file,
         )
 
     except Exception as e:
         # Ensure we restore on any exception
+        output_file = None
+        log_file = None
         try:
+            if attempt_logs:
+                output_file = create_attempt_copy(file_path, len(attempt_logs))
+                log_file = write_attempt_log(file_path, attempt_logs, format="json")
             restore_file(file_path, backup_path)
             cleanup_backup(backup_path)
         except Exception:
@@ -243,10 +306,12 @@ async def verify_proof(
         return VerificationResult(
             success=False,
             proof_code=current_proof,
-            attempts=1,
+            attempts=len(attempt_logs) if attempt_logs else 1,
             build_output="",
             errors=[f"Exception during verification: {e}"],
             elapsed_time=time.time() - start_time,
+            output_file=output_file,
+            log_file=log_file,
         )
 
 
