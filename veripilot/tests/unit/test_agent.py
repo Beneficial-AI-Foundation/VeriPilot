@@ -296,7 +296,6 @@ class TestLLMClient:
 
         assert "gemini" in PROVIDERS
         assert "claude" in PROVIDERS
-        assert "aristotle" in PROVIDERS
 
     def test_gemini_config(self):
         """Test Gemini provider configuration (Direct Google API)."""
@@ -333,17 +332,6 @@ class TestLLMClient:
 
         with pytest.raises(ValueError, match="Unknown model"):
             await client.generate("test", model="unknown")
-
-    @pytest.mark.asyncio
-    async def test_generate_aristotle_raises(self):
-        """Test that Aristotle raises for prompt-based API."""
-        from agent.llm_client import LLMClient
-
-        client = LLMClient()
-
-        with pytest.raises(ValueError, match="file-based API"):
-            await client.generate("test", model="aristotle")
-
 
 class TestProofResult:
     """Tests for ProofResult dataclass."""

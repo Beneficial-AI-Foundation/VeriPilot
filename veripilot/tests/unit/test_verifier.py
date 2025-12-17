@@ -41,6 +41,7 @@ class MockProofResult:
     rag_context: list = field(default_factory=list)
     error: str = None
     attempts: int = 1
+    temperature: float = 0.2
 
 
 class TestFileModifier:

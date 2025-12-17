@@ -23,6 +23,7 @@ class ProofResult:
     rag_context: list[str] = field(default_factory=list)  # RAG results used
     error: Optional[str] = None  # Error message if failed
     attempts: int = 1  # Number of attempts made
+    temperature: float = 0.2  # Temperature used for generation
 
 
 from .rag_query import build_query, retrieve_context

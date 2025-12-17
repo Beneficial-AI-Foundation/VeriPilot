@@ -170,6 +170,7 @@ async def verify_proof(
                         errors=[],
                         elapsed_time=time.time() - start_time,
                         model_used=proof_result.model_used,
+                        temperature=proof_result.temperature,
                     ))
 
                     # Create final attempt copy (e.g., Invert_VP2.lean)
@@ -225,6 +226,7 @@ async def verify_proof(
                 errors=[normalized_error.normalized],
                 elapsed_time=time.time() - start_time,
                 model_used=proof_result.model_used,
+                temperature=proof_result.temperature,
             ))
 
             all_errors.append(f"Attempt {attempt}: {normalized_error.normalized}")
@@ -264,6 +266,7 @@ async def verify_proof(
                 error=normalized_error.normalized,
                 attempt=attempt + 1,
                 model=proof_result.model_used,
+                base_temperature=proof_result.temperature,
                 rag=rag,
                 suggestion=normalized_error.suggestion,
                 successful_tactics=audit_controller.state.successful_tactics,
@@ -322,6 +325,7 @@ async def _regenerate_with_feedback(
     error: str,
     attempt: int,
     model: str,
+    base_temperature: float = 0.2,
     rag=None,
     suggestion: str = "",
     successful_tactics: Optional[list[str]] = None,
@@ -342,6 +346,7 @@ async def _regenerate_with_feedback(
         error: Normalized error message from failed build
         attempt: Current attempt number (2-4)
         model: LLM model to use
+        base_temperature: User's selected base temperature
         rag: Optional RAG instance
         suggestion: LLM-friendly suggestion for fixing the error
         successful_tactics: Tactics that worked in similar contexts
@@ -398,9 +403,10 @@ async def _regenerate_with_feedback(
         # Generate new proof
         client = LLMClient()
 
-        # Adjust temperature based on attempt
-        # Later attempts use higher temperature for diversity (Poetiq pattern)
-        temperature = 0.3 + (attempt - 1) * 0.15  # 0.3, 0.45, 0.6, 0.75
+        # Adjust temperature based on attempt and user's base temperature
+        # Later attempts use slightly higher temperature for diversity (Poetiq pattern)
+        # e.g., if base=0.2: attempt 2→0.275, attempt 3→0.35, attempt 4→0.425
+        temperature = base_temperature + (attempt - 1) * 0.075
 
         response = await client.generate(
             prompt,

@@ -24,10 +24,11 @@ load_dotenv()
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from agent.llm_client import PROVIDERS, LLMClient, generate_proof, generate_with_aristotle
+from agent.llm_client import PROVIDERS, LLMClient, generate_proof
 from agent.user_context import load_user_context
 from parser import find_sorries, SorryLocation
 from verifier import verify_proof
+from rag.lean.llamaindex_lean import LeanRAG
 
 app = typer.Typer(
     name="veripilot",
@@ -43,7 +44,6 @@ MODEL_OPTIONS = [
     ("gemini-openrouter", "Gemini 3 Pro (OpenRouter)", "Via OpenRouter API"),
     ("claude", "Claude Sonnet 4.5", "Via Anthropic API"),
     ("claude-opus", "Claude Opus 4.5", "Via Anthropic API - highest quality"),
-    ("aristotle", "Aristotle", "Lean specialist - file-based API"),
 ]
 
 # Default max verification attempts
@@ -102,6 +102,58 @@ def select_model() -> str:
     model_name = MODEL_OPTIONS[choice - 1][1]
     console.print(f"\n[green]Selected:[/green] {model_name}\n")
     return model_key
+
+
+def select_temperature() -> float:
+    """Interactive temperature selection menu."""
+    console.print("[bold]Select Temperature:[/bold]\n")
+
+    table = Table(show_header=False, box=None, padding=(0, 2))
+    table.add_column("Option", style="cyan", width=4)
+    table.add_column("Setting", style="white")
+    table.add_column("Description", style="dim")
+
+    options = [
+        ("0.2", "Low", "More deterministic, conservative proofs"),
+        ("0.4", "Medium", "Balanced creativity and consistency"),
+        ("0.7", "High", "More exploration, diverse attempts"),
+        ("custom", "Custom", "Enter value between 0.0-1.0"),
+    ]
+
+    for i, (temp, name, desc) in enumerate(options, 1):
+        default_marker = " [green](recommended)[/green]" if temp == "0.2" else ""
+        table.add_row(f"[{i}]", f"{name} ({temp}){default_marker}", desc)
+
+    console.print(table)
+    console.print()
+
+    choice = IntPrompt.ask(
+        "Enter choice",
+        default=1,
+        choices=["1", "2", "3", "4"],
+    )
+
+    if choice == 4:
+        temp_str = Prompt.ask(
+            "Enter temperature (0.0-1.0)",
+            default="0.2"
+        )
+        try:
+            temp_float = float(temp_str)
+            if 0.0 <= temp_float <= 1.0:
+                console.print(f"\n[green]Selected:[/green] {temp_float}\n")
+                return temp_float
+            else:
+                console.print("[yellow]Invalid range, using 0.2[/yellow]")
+                return 0.2
+        except ValueError:
+            console.print("[yellow]Invalid input, using 0.2[/yellow]")
+            return 0.2
+
+    temp_map = {1: 0.2, 2: 0.4, 3: 0.7}
+    selected = temp_map[choice]
+    console.print(f"\n[green]Selected:[/green] {selected}\n")
+    return selected
 
 
 def get_lean_file_path() -> str:
@@ -280,12 +332,14 @@ def select_mode() -> tuple[int, Optional[str], Optional[str]]:
 async def run_verification(
     file_path: str,
     model: str,
+    temperature: float = 0.2,
     context_path: Optional[str] = None,
     custom_prompt: Optional[str] = None,
 ):
     """Run the verification process with lake build verification."""
     console.print(f"\n[bold cyan]Verifying:[/bold cyan] {Path(file_path).name}")
     console.print(f"[bold cyan]Model:[/bold cyan] {PROVIDERS[model].name}")
+    console.print(f"[bold cyan]Temperature:[/bold cyan] {temperature}")
 
     # Find project root for lake build
     project_dir = find_lean_project_root(file_path)
@@ -294,6 +348,17 @@ async def run_verification(
         console.print("[dim]Make sure the file is inside a Lean project directory[/dim]")
         return
     console.print(f"[bold cyan]Project:[/bold cyan] {Path(project_dir).name}")
+
+    # Initialize RAG for context retrieval
+    rag = None
+    try:
+        console.print("[dim]Initializing RAG backends...[/dim]")
+        rag = LeanRAG()
+        await rag.initialize()
+        console.print("[bold cyan]RAG:[/bold cyan] Initialized")
+    except Exception as e:
+        console.print(f"[yellow]RAG unavailable:[/yellow] {e}")
+        console.print("[dim]Continuing without RAG context...[/dim]")
 
     # Load user context if provided
     user_context = None
@@ -346,7 +411,9 @@ async def run_verification(
             initial_result = await generate_proof(
                 sorry=sorry,
                 file_content=file_content,
+                rag=rag,
                 model=model,
+                temperature=temperature,
             )
 
             if not initial_result.success or not initial_result.proof_code:
@@ -360,6 +427,7 @@ async def run_verification(
             verification = await verify_proof(
                 sorry=sorry,
                 proof_result=initial_result,
+                rag=rag,
                 project_dir=project_dir,
                 max_attempts=MAX_ATTEMPTS,
             )
@@ -432,6 +500,7 @@ def main(ctx: typer.Context):
 
     # Interactive prompts
     model = select_model()
+    temperature = select_temperature()
     file_path = get_lean_file_path()
     mode, context_path, custom_prompt = select_mode()
 
@@ -440,6 +509,7 @@ def main(ctx: typer.Context):
     console.print("[bold]Ready to verify:[/bold]")
     console.print(f"  File: {file_path}")
     console.print(f"  Model: {PROVIDERS[model].name}")
+    console.print(f"  Temperature: {temperature}")
     if context_path:
         console.print(f"  Context: {context_path}")
     if custom_prompt:
@@ -455,6 +525,7 @@ def main(ctx: typer.Context):
         asyncio.run(run_verification(
             file_path=file_path,
             model=model,
+            temperature=temperature,
             context_path=context_path,
             custom_prompt=custom_prompt,
         ))

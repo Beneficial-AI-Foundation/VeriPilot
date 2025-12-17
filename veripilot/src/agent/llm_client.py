@@ -4,7 +4,6 @@ Multi-provider LLM client for the Prover Agent.
 Supports:
 - Gemini 3 Pro (via Direct Google API or OpenRouter)
 - Claude Sonnet/Opus 4.5 (via Anthropic API)
-- Aristotle (via aristotlelib - file-based)
 """
 
 import os
@@ -61,12 +60,6 @@ PROVIDERS = {
         client_type="anthropic",
         model="claude-opus-4-5",
         env_key="ANTHROPIC_API_KEY",
-    ),
-    "aristotle": ProviderConfig(
-        name="Aristotle",
-        client_type="aristotle",
-        model="aristotle",
-        env_key="ARISTOTLE_API_KEY",
     ),
 }
 
@@ -279,84 +272,12 @@ class LLMClient:
             raise ValueError(f"Anthropic API error: {str(e)}") from e
 
 
-async def generate_with_aristotle(
-    sorry: SorryLocation,
-    file_content: str,
-    output_path: Optional[str] = None,
-) -> str:
-    """
-    Generate proof using Aristotle (file-based API).
-
-    Aristotle works differently - it takes a full file and returns
-    the solved version. We extract the proof for the specific sorry.
-
-    Args:
-        sorry: The sorry location
-        file_content: Full file content
-        output_path: Optional path for output file
-
-    Returns:
-        Generated proof tactics
-    """
-    try:
-        import aristotlelib
-    except ImportError:
-        raise ImportError("aristotlelib not installed. Run: pip install aristotlelib")
-
-    api_key = os.getenv("ARISTOTLE_API_KEY")
-    if not api_key:
-        raise ValueError("ARISTOTLE_API_KEY not set in environment")
-
-    # Aristotle needs the actual file path
-    solution_path = await aristotlelib.Project.prove_from_file(
-        input_file_path=sorry.file_path,
-        auto_add_imports=True,
-        wait_for_completion=True,
-        polling_interval_seconds=30,
-        output_file_path=output_path,
-    )
-
-    # Read the solution and extract the proof
-    if solution_path and os.path.exists(solution_path):
-        with open(solution_path) as f:
-            solution_content = f.read()
-        return _extract_proof_from_solution(solution_content, sorry)
-
-    return ""
-
-
-def _extract_proof_from_solution(solution: str, sorry: SorryLocation) -> str:
-    """
-    Extract the proof for a specific theorem from Aristotle's solution.
-
-    Args:
-        solution: Full solved file content
-        sorry: The original sorry location
-
-    Returns:
-        Extracted proof tactics
-    """
-    import re
-
-    # Find the theorem in the solution
-    # Pattern: theorem <name> ... := by
-    pattern = rf"(theorem|lemma|def)\s+{re.escape(sorry.theorem_name)}[^:]*:=\s*by\s*\n((?:[ \t]+.*\n)*)"
-    match = re.search(pattern, solution, re.MULTILINE)
-
-    if match:
-        proof_block = match.group(2)
-        # Clean up the proof
-        lines = proof_block.strip().split("\n")
-        return "\n".join(line.strip() for line in lines if line.strip())
-
-    return ""
-
-
 async def generate_proof(
     sorry: SorryLocation,
     file_content: str,
     rag=None,  # LeanRAG instance
     model: str = "gemini",
+    temperature: float = 0.2,
     max_attempts: int = 4,
 ) -> "ProofResult":
     """
@@ -369,6 +290,7 @@ async def generate_proof(
         file_content: Full file content
         rag: Optional LeanRAG instance for context retrieval
         model: LLM model to use
+        temperature: Sampling temperature (0.2 recommended for proofs)
         max_attempts: Maximum retry attempts
 
     Returns:
@@ -389,26 +311,6 @@ async def generate_proof(
     context = format_context(sorry, file_content, rag_results)
     rag_context = [r.full_name for r in rag_results]
 
-    # Handle Aristotle specially
-    if model == "aristotle":
-        try:
-            proof = await generate_with_aristotle(sorry, file_content)
-            return ProofResult(
-                success=bool(proof),
-                proof_code=proof,
-                model_used="aristotle",
-                rag_context=rag_context,
-                error=None if proof else "Aristotle returned empty solution",
-            )
-        except Exception as e:
-            return ProofResult(
-                success=False,
-                proof_code="",
-                model_used="aristotle",
-                rag_context=rag_context,
-                error=str(e),
-            )
-
     # Standard LLM flow
     client = LLMClient()
 
@@ -417,7 +319,7 @@ async def generate_proof(
 
     for attempt in range(1, max_attempts + 1):
         try:
-            response = await client.generate(prompt, model=model)
+            response = await client.generate(prompt, model=model, temperature=temperature)
             proof = extract_proof_from_response(response)
 
             if proof:
@@ -427,6 +329,7 @@ async def generate_proof(
                     model_used=model,
                     rag_context=rag_context,
                     attempts=attempt,
+                    temperature=temperature,
                 )
 
             # Empty response - build retry prompt
@@ -444,6 +347,7 @@ async def generate_proof(
                     rag_context=rag_context,
                     error=str(e),
                     attempts=attempt,
+                    temperature=temperature,
                 )
             # Retry on error
             prompt = build_retry_prompt(
@@ -457,4 +361,5 @@ async def generate_proof(
         rag_context=rag_context,
         error="Max attempts reached",
         attempts=max_attempts,
+        temperature=temperature,
     )
