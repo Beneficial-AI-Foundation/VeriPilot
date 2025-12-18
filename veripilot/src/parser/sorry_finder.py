@@ -33,14 +33,29 @@ def find_sorries(
     # Find all sorry occurrences
     sorry_pattern = re.compile(r"\bsorry\b")
 
+    # Track block comment state
+    in_block_comment = False
+
     for line_num, line in enumerate(lines, start=1):
+        # Handle block comments (/-  -/)
+        if in_block_comment:
+            if "-/" in line:
+                in_block_comment = False
+            continue
+        if "/-" in line and "-/" not in line:
+            in_block_comment = True
+            continue
+
         # Skip if outside line range
         if line_range:
             start, end = line_range
             if line_num < start or line_num > end:
                 continue
 
-        for match in sorry_pattern.finditer(line):
+        # Get the code portion (before any line comment --)
+        code_portion = line.split("--")[0] if "--" in line else line
+
+        for match in sorry_pattern.finditer(code_portion):
             column = match.start() + 1  # 1-indexed
 
             # Find the enclosing theorem/lemma/def

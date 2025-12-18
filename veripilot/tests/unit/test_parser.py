@@ -8,15 +8,15 @@ from src.parser.goal_extractor import parse_goal_response, format_goal_for_promp
 
 
 def _find_benchmark_file() -> str:
-    """Find the benchmark file in either BAIF or legacy path."""
+    """Find the test fixture file with known sorry locations."""
     candidates = [
-        "/workspace/projects/BAIF/VeriPilot/lean-projects/dalek-verify-lean/ai-benchmark/tests/input.lean",
-        "/workspace/projects/VeriPilot/lean-projects/dalek-verify-lean/ai-benchmark/tests/input.lean",
+        "/workspace/projects/BAIF/VeriPilot/lean-projects/dalek-verify-lean/ai-benchmark/tests/test_parser_fixture.lean",
+        "/workspace/projects/VeriPilot/lean-projects/dalek-verify-lean/ai-benchmark/tests/test_parser_fixture.lean",
     ]
     for path in candidates:
         if Path(path).exists():
             return path
-    raise FileNotFoundError(f"Benchmark file not found in: {candidates}")
+    raise FileNotFoundError(f"Test fixture file not found in: {candidates}")
 
 
 @pytest.fixture
@@ -37,8 +37,8 @@ class TestSorryFinder:
         """Test that sorry locations are correct."""
         sorries = find_sorries(benchmark_file)
 
-        # Expected lines: 21, 22, 23, 24, 33, 56
-        expected_lines = [21, 22, 23, 24, 33, 56]
+        # Expected lines based on test_parser_fixture.lean
+        expected_lines = [20, 21, 22, 23, 29, 51]
         actual_lines = [s.line for s in sorries]
         assert actual_lines == expected_lines
 
@@ -52,16 +52,16 @@ class TestSorryFinder:
 
     def test_line_range_filtering(self, benchmark_file):
         """Test that line range filtering works correctly."""
-        # Only the sub_spec sorry on line 56
-        sorries = find_sorries(benchmark_file, line_range=(50, 60))
+        # Only the sub_spec sorry on line 51
+        sorries = find_sorries(benchmark_file, line_range=(50, 55))
         assert len(sorries) == 1
-        assert sorries[0].line == 56
+        assert sorries[0].line == 51
         assert sorries[0].theorem_name == "sub_spec"
 
-        # First 4 sorries (lines 21-24)
-        sorries = find_sorries(benchmark_file, line_range=(20, 25))
+        # First 4 sorries (lines 20-23)
+        sorries = find_sorries(benchmark_file, line_range=(20, 24))
         assert len(sorries) == 4
-        assert all(20 <= s.line <= 25 for s in sorries)
+        assert all(20 <= s.line <= 24 for s in sorries)
 
     def test_proof_prefix_extraction(self, benchmark_file):
         """Test that proof prefixes are extracted."""
@@ -70,8 +70,8 @@ class TestSorryFinder:
         # All sorries should have some proof context
         for sorry in sorries:
             assert sorry.proof_prefix is not None
-            # First 5 should have unfold tactics
-            if sorry.line <= 33:
+            # First 5 sorries (lines <= 29) should have unfold tactics
+            if sorry.line <= 29:
                 assert "unfold" in sorry.proof_prefix
 
     def test_file_not_found(self):
