@@ -180,6 +180,11 @@ class LeanMCPClient:
         if not result:
             return []
 
+        # Handle case where result is a string (MCP returned non-JSON)
+        if isinstance(result, str):
+            logger.warning(f"MCP returned string instead of dict for diagnostics: {result[:200]}")
+            return []
+
         items = result.get("items", [])
         return [DiagnosticItem.from_dict(item) for item in items]
 
@@ -207,6 +212,11 @@ class LeanMCPClient:
         result = await self.call_tool("lean_goal", args)
 
         if not result:
+            return None
+
+        # Handle case where result is a string (MCP returned non-JSON)
+        if isinstance(result, str):
+            logger.warning(f"MCP returned string instead of dict for goal: {result[:200]}")
             return None
 
         return GoalState(

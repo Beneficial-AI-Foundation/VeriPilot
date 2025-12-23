@@ -7,8 +7,12 @@ Supports:
 """
 
 import os
+import time
+import logging
 from typing import Optional
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 
 from parser import SorryLocation
 from .prompts import (
@@ -106,9 +110,19 @@ class LLMClient:
             if not api_key:
                 raise ValueError(f"{provider.env_key} not set in environment")
 
+            # OpenRouter requires specific headers for proper API access
+            # See: https://openrouter.ai/docs/api-reference
+            default_headers = {}
+            if provider.base_url and "openrouter" in provider.base_url:
+                default_headers = {
+                    "HTTP-Referer": "https://github.com/VeriPilot/veripilot",
+                    "X-Title": "VeriPilot",
+                }
+
             self._openai_client = AsyncOpenAI(
                 api_key=api_key,
                 base_url=provider.base_url,
+                default_headers=default_headers if default_headers else None,
             )
         return self._openai_client
 
@@ -133,7 +147,7 @@ class LLMClient:
         model: str = "gemini",
         system_prompt: Optional[str] = None,
         temperature: float = 0.7,
-        max_tokens: int = 2000,
+        max_tokens: int = 8192,  # Increased from 2000 - Lean proofs can be verbose
     ) -> str:
         """
         Generate a response from an LLM.
@@ -224,19 +238,111 @@ class LLMClient:
         max_tokens: int,
     ) -> str:
         """Generate using OpenAI-compatible API (OpenRouter)."""
+        from openai import APIError, APIConnectionError, RateLimitError, AuthenticationError
+
         client = self._get_openai_client(provider)
 
-        response = await client.chat.completions.create(
-            model=provider.model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=temperature,
-            max_tokens=max_tokens,
+        # Log request details
+        logger.info(
+            f"OpenRouter request: model={provider.model}, "
+            f"base_url={provider.base_url}, temp={temperature}, max_tokens={max_tokens}"
         )
+        logger.debug(f"System prompt length: {len(system_prompt)} chars")
+        logger.debug(f"User prompt length: {len(user_prompt)} chars")
 
-        return response.choices[0].message.content or ""
+        start_time = time.time()
+        try:
+            response = await client.chat.completions.create(
+                model=provider.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+
+            latency = time.time() - start_time
+
+            # Get choice details for debugging
+            choice = response.choices[0] if response.choices else None
+            content = choice.message.content if choice and choice.message else ""
+            content = content or ""
+
+            # Get finish reason
+            finish_reason = choice.finish_reason if choice else "no_choice"
+
+            # Log response details
+            logger.info(
+                f"OpenRouter response: latency={latency:.2f}s, "
+                f"response_length={len(content)} chars, finish_reason={finish_reason}"
+            )
+            if hasattr(response, 'usage') and response.usage:
+                logger.info(
+                    f"Token usage: prompt={response.usage.prompt_tokens}, "
+                    f"completion={response.usage.completion_tokens}, "
+                    f"total={response.usage.total_tokens}"
+                )
+
+            # Detailed diagnostics for empty response
+            if not content:
+                logger.warning(
+                    f"OpenRouter returned empty response content! "
+                    f"finish_reason={finish_reason}, "
+                    f"num_choices={len(response.choices) if response.choices else 0}"
+                )
+                # Specific warning for length limit
+                if finish_reason == "length":
+                    logger.error(
+                        f"Response cut off due to max_tokens limit ({max_tokens}). "
+                        f"The model started generating but hit the token limit before producing content. "
+                        f"Consider increasing max_tokens."
+                    )
+                # Check for refusal or other message fields
+                if choice and choice.message:
+                    msg = choice.message
+                    refusal = getattr(msg, 'refusal', None)
+                    if refusal:
+                        logger.warning(f"Model refusal: {refusal}")
+                    # Log all message attributes for debugging
+                    logger.debug(f"Message attributes: {vars(msg) if hasattr(msg, '__dict__') else msg}")
+                # Check for OpenRouter-specific error in response
+                if hasattr(response, 'error') and response.error:
+                    logger.error(f"OpenRouter error field: {response.error}")
+
+            return content
+
+        except AuthenticationError as e:
+            logger.error(f"OpenRouter auth error: {e}")
+            raise ValueError(f"OpenRouter authentication failed. Check {provider.env_key}.") from e
+        except RateLimitError as e:
+            logger.error(f"OpenRouter rate limit: {e}")
+            raise ValueError(f"OpenRouter rate limit exceeded for {provider.model}.") from e
+        except APIConnectionError as e:
+            logger.error(f"OpenRouter connection error: {e}")
+            raise ValueError(f"Failed to connect to OpenRouter: {e}") from e
+        except APIError as e:
+            # Log full error details for debugging
+            logger.error(
+                f"OpenRouter API error: status={getattr(e, 'status_code', 'N/A')}, "
+                f"message={e.message if hasattr(e, 'message') else str(e)}"
+            )
+            # Check for common OpenRouter-specific errors
+            error_msg = str(e).lower()
+            if "model" in error_msg and ("not found" in error_msg or "not available" in error_msg):
+                raise ValueError(
+                    f"Model '{provider.model}' not available on OpenRouter. "
+                    f"Check model name or account tier (some models require premium access)."
+                ) from e
+            if "quota" in error_msg or "credits" in error_msg:
+                raise ValueError(
+                    f"OpenRouter quota/credits exhausted for {provider.model}."
+                ) from e
+            raise ValueError(f"OpenRouter API error: {e}") from e
+        except Exception as e:
+            latency = time.time() - start_time
+            logger.error(f"Unexpected OpenRouter error after {latency:.2f}s: {type(e).__name__}: {e}")
+            raise
 
     async def _generate_anthropic(
         self,
