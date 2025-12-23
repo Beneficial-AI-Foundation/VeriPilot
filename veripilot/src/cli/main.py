@@ -13,10 +13,12 @@ from typing import Optional
 
 import typer
 from rich.console import Console
-from rich.panel import Panel
 from rich.prompt import Prompt, IntPrompt, Confirm
 from rich.table import Table
 from dotenv import load_dotenv
+
+# Version info
+__version__ = "0.1.0"
 
 # Load .env file for API keys
 load_dotenv()
@@ -67,13 +69,43 @@ def find_lean_project_root(file_path: str) -> Optional[str]:
     return None
 
 
+def _supports_color() -> bool:
+    """Check if terminal supports ANSI colors."""
+    # Check NO_COLOR env var (https://no-color.org/)
+    if os.environ.get("NO_COLOR"):
+        return False
+    # Check if stdout is a TTY
+    if not sys.stdout.isatty():
+        return False
+    # Check for dumb terminal
+    if os.environ.get("TERM") == "dumb":
+        return False
+    return True
+
+
 def display_banner():
-    """Display the VeriPilot welcome banner."""
-    banner = """
-[bold cyan]VeriPilot[/bold cyan] - Lean 4 Verification Copilot
-[dim]Dual-language Rust verification assistant[/dim]
-    """
-    console.print(Panel(banner.strip(), border_style="cyan"))
+    """Display the VeriPilot ASCII art banner."""
+    # Color codes (ANSI 256)
+    if _supports_color():
+        C_VERI = "\033[38;5;69m"    # Royal Blue - VERI prefix
+        C_PILOT = "\033[38;5;117m"  # Sky Blue - PILOT suffix
+        C_GREY = "\033[38;5;240m"   # Dark grey - decorative elements
+        C_RESET = "\033[0m"
+        C_BOLD = "\033[1m"
+    else:
+        C_VERI = C_PILOT = C_GREY = C_RESET = C_BOLD = ""
+
+    # ASCII art banner - fits within 80 columns
+    banner = f"""
+{C_VERI}██╗   ██╗███████╗██████╗ ██╗{C_PILOT}██████╗ ██╗██╗     ██████╗ ████████╗
+{C_VERI}██║   ██║██╔════╝██╔══██╗██║{C_PILOT}██╔══██╗██║██║     ██╔══██╗╚══██╔══╝
+{C_VERI}██║   ██║█████╗  ██████╔╝██║{C_PILOT}██████╔╝██║██║     ██║  ██║   ██║
+{C_VERI}╚██╗ ██╔╝██╔══╝  ██╔══██╗██║{C_PILOT}██╔═══╝ ██║██║     ██║  ██║   ██║
+{C_VERI} ╚████╔╝ ███████╗██║  ██║██║{C_PILOT}██║     ██║███████╗██████╔╝   ██║
+{C_VERI}  ╚═══╝  ╚══════╝╚═╝  ╚═╝╚═╝{C_PILOT}╚═╝     ╚═╝╚══════╝╚═════╝    ╚═╝   {C_RESET}
+      {C_GREY}::{C_RESET} {C_BOLD}Formal Verification Copilot{C_RESET} {C_GREY}::{C_RESET} v{__version__}
+"""
+    print(banner)
 
 
 def select_model() -> str:
@@ -586,14 +618,26 @@ def main(ctx: typer.Context):
 @app.command()
 def version():
     """Show VeriPilot version."""
-    console.print("[cyan]VeriPilot[/cyan] v0.1.0")
+    if _supports_color():
+        C_VERI = "\033[38;5;69m"
+        C_PILOT = "\033[38;5;117m"
+        C_RESET = "\033[0m"
+        print(f"{C_VERI}Veri{C_PILOT}Pilot{C_RESET} v{__version__}")
+    else:
+        print(f"VeriPilot v{__version__}")
 
 
 @app.command()
 def models():
     """List available LLM providers."""
-    display_banner()
-    console.print("\n[bold]Available LLM Providers:[/bold]\n")
+    # Show version line (not full banner)
+    if _supports_color():
+        C_VERI = "\033[38;5;69m"
+        C_PILOT = "\033[38;5;117m"
+        C_RESET = "\033[0m"
+        print(f"\n{C_VERI}Veri{C_PILOT}Pilot{C_RESET} v{__version__} - Available LLM Providers\n")
+    else:
+        print(f"\nVeriPilot v{__version__} - Available LLM Providers\n")
 
     table = Table(show_header=True, header_style="bold")
     table.add_column("Key", style="cyan")
