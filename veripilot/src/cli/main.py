@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from agent.llm_client import PROVIDERS, LLMClient, generate_proof
 from agent.user_context import load_user_context
+from agent.react import AgentMode, get_available_modes, ReActAgent
 from parser import find_sorries, SorryLocation
 from verifier import verify_proof, verify_proof_lsp, VerifierService
 from rag.lean.llamaindex_lean import LeanRAG
@@ -186,6 +187,40 @@ def select_temperature() -> float:
     selected = temp_map[choice]
     console.print(f"\n[green]Selected:[/green] {selected}\n")
     return selected
+
+
+def select_verification_mode() -> AgentMode:
+    """Interactive verification mode selection menu."""
+    console.print("[bold]Select Verification Mode:[/bold]\n")
+
+    table = Table(show_header=False, box=None, padding=(0, 2))
+    table.add_column("Option", style="cyan", width=4)
+    table.add_column("Mode", style="white")
+    table.add_column("Description", style="dim")
+
+    modes = get_available_modes()
+    for i, (mode_value, display_name, desc) in enumerate(modes, 1):
+        phase_marker = ""
+        if "Phase 2" in desc:
+            phase_marker = " [yellow](coming soon)[/yellow]"
+        elif "Phase 3" in desc:
+            phase_marker = " [yellow](coming soon)[/yellow]"
+        default_marker = " [green](default)[/green]" if mode_value == "just_retry" else ""
+        table.add_row(f"[{i}]", f"{display_name}{default_marker}{phase_marker}", desc.split("[")[0].strip())
+
+    console.print(table)
+    console.print()
+
+    choice = IntPrompt.ask(
+        "Enter choice",
+        default=1,
+        choices=[str(i) for i in range(1, len(modes) + 1)],
+    )
+
+    mode_value = modes[choice - 1][0]
+    mode_name = modes[choice - 1][1]
+    console.print(f"\n[green]Selected:[/green] {mode_name}\n")
+    return AgentMode(mode_value)
 
 
 def get_lean_file_path() -> str:
@@ -368,6 +403,7 @@ async def run_verification(
     context_path: Optional[str] = None,
     custom_prompt: Optional[str] = None,
     use_lsp: bool = True,
+    agent_mode: AgentMode = AgentMode.JUST_RETRY,
 ):
     """
     Run the verification process.
@@ -379,10 +415,12 @@ async def run_verification(
         context_path: Optional context file path
         custom_prompt: Optional custom prompt
         use_lsp: Use LSP for instant verification (default True)
+        agent_mode: Verification agent mode (JUST_RETRY, REACT, etc.)
     """
     console.print(f"\n[bold cyan]Verifying:[/bold cyan] {Path(file_path).name}")
     console.print(f"[bold cyan]Model:[/bold cyan] {PROVIDERS[model].name}")
     console.print(f"[bold cyan]Temperature:[/bold cyan] {temperature}")
+    console.print(f"[bold cyan]Agent Mode:[/bold cyan] {agent_mode.value}")
 
     # Find project root
     project_dir = find_lean_project_root(file_path)
@@ -481,8 +519,26 @@ async def run_verification(
                     failed_proofs.append((sorry.theorem_name, "Generation failed"))
                     continue
 
-                # Step 2: Verify with retry loop
-                if verifier_service and use_lsp:
+                # Step 2: Verify with retry loop or ReAct agent
+                if agent_mode != AgentMode.JUST_RETRY and verifier_service and use_lsp:
+                    # Use ReAct agent for reasoning-based verification
+                    console.print(f"  [dim]Verifying with {agent_mode.value} agent...[/dim]")
+                    react_agent = ReActAgent(
+                        mode=agent_mode,
+                        max_attempts=MAX_ATTEMPTS,
+                        model=model,
+                        temperature=temperature,
+                    )
+                    react_result = await react_agent.verify(
+                        sorry=sorry,
+                        initial_proof=initial_result.proof_code,
+                        file_content=file_content,
+                        verifier_service=verifier_service,
+                        rag=rag,
+                    )
+                    # Convert to VerificationResult for consistent handling
+                    verification = react_result.to_verification_result()
+                elif verifier_service and use_lsp:
                     # Use LSP verification (instant, never modifies original)
                     mcp_status = "warm" if verifier_service.status.mcp_available else "warming up"
                     console.print(f"  [dim]Verifying via LSP ({mcp_status})...[/dim]")
@@ -579,6 +635,7 @@ def main(ctx: typer.Context):
     # Interactive prompts
     model = select_model()
     temperature = select_temperature()
+    agent_mode = select_verification_mode()
     file_path = get_lean_file_path()
     mode, context_path, custom_prompt = select_mode()
 
@@ -588,6 +645,7 @@ def main(ctx: typer.Context):
     console.print(f"  File: {file_path}")
     console.print(f"  Model: {PROVIDERS[model].name}")
     console.print(f"  Temperature: {temperature}")
+    console.print(f"  Agent: {agent_mode.value}")
     if context_path:
         console.print(f"  Context: {context_path}")
     if custom_prompt:
@@ -606,6 +664,7 @@ def main(ctx: typer.Context):
             temperature=temperature,
             context_path=context_path,
             custom_prompt=custom_prompt,
+            agent_mode=agent_mode,
         ))
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted.[/yellow]")
