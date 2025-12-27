@@ -37,6 +37,41 @@ logger = logging.getLogger(__name__)
 
 
 # ==============================================================================
+# Prompt Loading
+# ==============================================================================
+
+_REACT_SYSTEM_PROMPT_CACHE: str | None = None
+
+
+def _load_react_system_prompt() -> str:
+    """
+    Load the ReAct system prompt from prompts/verifier/react_system_v1.md.
+
+    Uses caching for performance. Falls back to minimal prompt if file not found.
+    """
+    global _REACT_SYSTEM_PROMPT_CACHE
+
+    if _REACT_SYSTEM_PROMPT_CACHE is not None:
+        return _REACT_SYSTEM_PROMPT_CACHE
+
+    try:
+        from agent.prompt_loader import load_latest_prompt
+        _REACT_SYSTEM_PROMPT_CACHE = load_latest_prompt("react_system")
+        logger.debug("Loaded ReAct system prompt from file")
+    except (ImportError, FileNotFoundError) as e:
+        logger.warning(f"Could not load react_system prompt: {e}, using fallback")
+        _REACT_SYSTEM_PROMPT_CACHE = """You are a Lean 4 theorem prover using ReAct (Reasoning + Acting).
+Output in this exact format:
+THOUGHT: <reasoning about what to try>
+TACTIC: <Lean 4 tactic code>
+CONFIDENCE: <0.0-1.0>
+
+Use `try grind`, `try omega`, `try ring` for safety. Use `rw [h]` to rewrite with hypotheses."""
+
+    return _REACT_SYSTEM_PROMPT_CACHE
+
+
+# ==============================================================================
 # Reasoning Node
 # ==============================================================================
 
@@ -60,8 +95,11 @@ async def reasoning_node(state: ProofState) -> dict[str, Any]:
     step = state["step"] + 1
     attempt = state["attempt_count"]
 
-    # Build reasoning prompt
+    # Build reasoning prompt (user message)
     prompt = _build_reasoning_prompt(state)
+
+    # Load ReAct system prompt
+    system_prompt = _load_react_system_prompt()
 
     # Generate thought and action plan
     try:
@@ -73,6 +111,7 @@ async def reasoning_node(state: ProofState) -> dict[str, Any]:
         response = await client.generate(
             prompt,
             model=state["model_used"],
+            system_prompt=system_prompt,
             temperature=temperature,
         )
 

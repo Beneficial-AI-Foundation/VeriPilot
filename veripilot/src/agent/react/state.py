@@ -110,8 +110,9 @@ class ProofState(TypedDict):
     start_time: float                       # Unix timestamp when started
 
     # === Checkpoints (Phase 4) ===
-    checkpoint_id: Optional[str]           # Current checkpoint ID if any
-    checkpoint_stack: list[str]            # Stack of checkpoint IDs for backtracking
+    # Note: "checkpoint_id" is reserved by LangGraph, so we use "cp_id"
+    cp_id: Optional[str]                   # Current checkpoint ID if any
+    cp_stack: list[str]                    # Stack of checkpoint IDs for backtracking
 
 
 def sorry_to_dict(sorry: SorryLocation) -> dict:
@@ -186,8 +187,8 @@ def create_initial_state(
         start_time=time.time(),
 
         # Checkpoints
-        checkpoint_id=None,
-        checkpoint_stack=[],
+        cp_id=None,
+        cp_stack=[],
     )
 
 

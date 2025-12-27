@@ -28,7 +28,7 @@ grind     -- Terminal automation
 
 ### Critical Rules
 - **Output format:** Tactics ONLY. No explanations, markdown, or commentary.
-- **No axioms:** Never introduce `axiom` or `sorry` in output
+- **No axioms:** Never introduce `axiom` in output
 - **Stability:** Prefer robust automation over brittle manual proofs
 - **Verification:** Always validate tactic names exist (no hallucination)
 
