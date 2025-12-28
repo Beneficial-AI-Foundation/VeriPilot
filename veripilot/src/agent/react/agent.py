@@ -45,6 +45,7 @@ from .state import (
     dict_to_sorry,
 )
 from .graph import create_react_graph, run_react_verification
+from verifier.file_modifier import AttemptLog, write_attempt_log
 
 if TYPE_CHECKING:
     from parser import SorryLocation
@@ -324,13 +325,25 @@ class ReActAgent:
                 model_used=self.model,
             )
 
+        # Build attempt logs from observations
+        file_path = str(sorry.file_path)
+        attempt_logs = self._build_attempt_logs(final_state, start_time)
+        log_file = None
+        if attempt_logs:
+            try:
+                log_file = write_attempt_log(file_path, attempt_logs, format="json")
+                logger.info(f"Wrote ReAct log to {log_file}")
+            except Exception as e:
+                logger.warning(f"Failed to write attempt log: {e}")
+
         # Convert final state to result
-        return self._state_to_result(final_state, start_time)
+        return self._state_to_result(final_state, start_time, log_file)
 
     def _state_to_result(
         self,
         state: ProofState,
         start_time: float,
+        log_file: Optional[str] = None,
     ) -> ReActResult:
         """Convert ProofState to ReActResult."""
         return ReActResult(
@@ -346,7 +359,42 @@ class ReActAgent:
             mode=state["mode"],
             model_used=state["model_used"],
             steps=state["step"],
+            log_file=log_file,
         )
+
+    def _build_attempt_logs(
+        self,
+        state: ProofState,
+        start_time: float,
+    ) -> list[AttemptLog]:
+        """Build AttemptLog entries from ReAct state observations."""
+        attempt_logs = []
+        observations = state.get("observations", [])
+        actions = state.get("actions", [])
+
+        for i, obs in enumerate(observations):
+            # Get corresponding action if available
+            action = actions[i] if i < len(actions) else {}
+            proof_code = action.get("content", state.get("current_proof", ""))
+
+            # Extract errors from observation
+            errors = []
+            if not obs.get("success", False):
+                error_content = obs.get("content", "")
+                if error_content:
+                    errors = [error_content[:500]]  # Truncate long errors
+
+            attempt_logs.append(AttemptLog.create(
+                attempt=i + 1,
+                proof_code=proof_code,
+                build_success=obs.get("success", False),
+                errors=errors,
+                elapsed_time=time.time() - start_time,
+                model_used=state.get("model_used", self.model),
+                temperature=state.get("temperature", self.temperature),
+            ))
+
+        return attempt_logs
 
 
 # ==============================================================================

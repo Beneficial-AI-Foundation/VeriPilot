@@ -606,7 +606,7 @@ async def run_verification(
 
     # Summary
     console.print("\n" + "─" * 50)
-    console.print("[bold]Verification Complete![/bold]")
+    console.print("[bold]Process Complete[/bold]")
     if verified_proofs:
         console.print(f"[green]✓ {len(verified_proofs)} proof(s) verified successfully[/green]")
         for name, attempts, output_file in verified_proofs:
