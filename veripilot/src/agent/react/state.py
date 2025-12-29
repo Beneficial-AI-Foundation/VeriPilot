@@ -65,6 +65,30 @@ class ObservationRecord(TypedDict):
     goals_remaining: Optional[int]  # Number of goals still open
 
 
+class RecoveryRecord(TypedDict):
+    """Record of an OpenManus recovery decision."""
+
+    step: int                       # Step number when recovery was triggered
+    error_type: str                 # Error type that triggered recovery
+    severity: str                   # ErrorSeverity value
+    strategy: str                   # RecoveryStrategy value
+    original_tactic: str            # Tactic that failed
+    modified_tactic: str            # Modified tactic to try
+    success: bool                   # Whether recovery succeeded
+
+
+class SubTaskRecord(TypedDict):
+    """Record of a ROMA subtask execution."""
+
+    subtask_id: str                 # Subtask identifier
+    description: str                # What this subtask does
+    goal_hint: str                  # Expected goal pattern
+    tactics_used: list[str]         # Tactics that were applied
+    success: bool                   # Whether subtask was solved
+    attempts: int                   # Number of attempts
+    error: Optional[str]            # Error if failed
+
+
 class ProofState(TypedDict):
     """
     LangGraph state for proof verification.
@@ -113,6 +137,29 @@ class ProofState(TypedDict):
     # Note: "checkpoint_id" is reserved by LangGraph, so we use "cp_id"
     cp_id: Optional[str]                   # Current checkpoint ID if any
     cp_stack: list[str]                    # Stack of checkpoint IDs for backtracking
+
+    # === OpenManus Recovery Fields ===
+    recovery_stage: int                     # 0=fresh, 1=primary strategy, 2=fallback
+    recovery_attempts: int                  # Total recovery attempts this sorry
+    current_error_type: Optional[str]       # Latest classified error type
+    current_severity: Optional[str]         # ErrorSeverity value
+    active_strategy: Optional[str]          # RecoveryStrategy value
+    tried_tactics: Annotated[list[str], operator.add]  # All tactics tried
+    successful_tactics: list[str]           # Tactics that worked (for learning)
+    definitions_to_unfold: list[str]        # Definitions identified for unfolding
+    recovery_records: Annotated[list[RecoveryRecord], operator.add]  # Recovery trace
+
+    # === ROMA Hierarchical Decomposition Fields ===
+    roma_active: bool                       # Whether ROMA decomposition is active
+    roma_complexity: Optional[str]          # GoalComplexity value (atomic/simple/moderate/complex)
+    roma_complexity_score: float            # Overall complexity score 0.0-1.0
+    roma_strategy: Optional[str]            # DecompositionStrategy value
+    roma_plan: Optional[dict]               # Serialized DecompositionPlan
+    roma_current_subtask: Optional[str]     # ID of subtask being worked on
+    roma_completed_subtasks: list[str]      # IDs of completed subtasks
+    roma_subtask_records: Annotated[list[SubTaskRecord], operator.add]  # Subtask trace
+    roma_sub_proofs: list[dict]             # Collected sub-proofs (serialized SubProof)
+    roma_aggregated_proof: Optional[str]    # Final aggregated proof if available
 
 
 def sorry_to_dict(sorry: SorryLocation) -> dict:
@@ -189,6 +236,29 @@ def create_initial_state(
         # Checkpoints
         cp_id=None,
         cp_stack=[],
+
+        # OpenManus Recovery (initialized fresh)
+        recovery_stage=0,
+        recovery_attempts=0,
+        current_error_type=None,
+        current_severity=None,
+        active_strategy=None,
+        tried_tactics=[],
+        successful_tactics=[],
+        definitions_to_unfold=[],
+        recovery_records=[],
+
+        # ROMA Hierarchical Decomposition (initialized fresh)
+        roma_active=False,
+        roma_complexity=None,
+        roma_complexity_score=0.0,
+        roma_strategy=None,
+        roma_plan=None,
+        roma_current_subtask=None,
+        roma_completed_subtasks=[],
+        roma_subtask_records=[],
+        roma_sub_proofs=[],
+        roma_aggregated_proof=None,
     )
 
 

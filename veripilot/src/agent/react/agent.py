@@ -44,7 +44,14 @@ from .state import (
     get_trace_summary,
     dict_to_sorry,
 )
-from .graph import create_react_graph, run_react_verification
+from .graph import (
+    create_react_graph,
+    run_react_verification,
+    create_om_react_graph,
+    run_om_react_verification,
+    create_roma_graph,
+    run_roma_verification,
+)
 from verifier.file_modifier import AttemptLog, write_attempt_log
 
 if TYPE_CHECKING:
@@ -190,18 +197,14 @@ class ReActAgent:
                 verifier_service, rag, on_step, start_time
             )
         elif self.mode == AgentMode.OM_REACT:
-            # Phase 2: OpenManus error recovery
-            # For now, fall back to basic ReAct
-            logger.info("OM_REACT mode not yet implemented, using REACT")
-            return await self._run_react(
+            # OpenManus error recovery mode
+            return await self._run_om_react(
                 sorry, initial_proof, file_content, goal_state,
                 verifier_service, rag, on_step, start_time
             )
         elif self.mode == AgentMode.ROMA:
-            # Phase 3: ROMA hierarchical decomposition
-            # For now, fall back to basic ReAct
-            logger.info("ROMA mode not yet implemented, using REACT")
-            return await self._run_react(
+            # ROMA hierarchical decomposition mode
+            return await self._run_roma(
                 sorry, initial_proof, file_content, goal_state,
                 verifier_service, rag, on_step, start_time
             )
@@ -339,6 +342,213 @@ class ReActAgent:
         # Convert final state to result
         return self._state_to_result(final_state, start_time, log_file)
 
+    async def _run_om_react(
+        self,
+        sorry: "SorryLocation",
+        initial_proof: str,
+        file_content: str,
+        goal_state: str,
+        verifier_service: Optional["VerifierService"],
+        rag: Optional[Any],
+        on_step: Optional[callable],
+        start_time: float,
+    ) -> ReActResult:
+        """Run OpenManus-enhanced ReAct verification loop."""
+        # Get RAG results if available
+        rag_results = []
+        if rag:
+            try:
+                from agent.rag_query import retrieve_context
+                rag_results = await retrieve_context(sorry, rag)
+                if rag_results and hasattr(rag_results[0], '__dict__'):
+                    rag_results = [vars(r) for r in rag_results]
+            except Exception as e:
+                logger.warning(f"RAG retrieval failed: {e}")
+
+        # Create initial state
+        state = create_initial_state(
+            sorry=sorry,
+            proof_code=initial_proof,
+            file_content=file_content,
+            goal_state=goal_state,
+            rag_results=rag_results,
+            model_used=self.model,
+            temperature=self.temperature,
+            max_attempts=self.max_attempts,
+            mode=AgentMode.OM_REACT,
+        )
+
+        # Run the OpenManus-enhanced graph
+        try:
+            final_state = await run_om_react_verification(
+                initial_state=state,
+                verifier_service=verifier_service,
+                on_step=on_step,
+            )
+        except Exception as e:
+            logger.error(f"OM_REACT graph error: {e}")
+            return ReActResult(
+                success=False,
+                proof_code=initial_proof,
+                attempts=state.get("attempt_count", 1),
+                elapsed_time=time.time() - start_time,
+                errors=[str(e)],
+                final_status="error",
+                mode=AgentMode.OM_REACT.value,
+                model_used=self.model,
+            )
+
+        # Build attempt logs including recovery info
+        file_path = str(sorry.file_path)
+        attempt_logs = self._build_attempt_logs(final_state, start_time)
+        log_file = None
+        if attempt_logs:
+            try:
+                log_file = write_attempt_log(file_path, attempt_logs, format="json")
+                logger.info(f"Wrote OM_REACT log to {log_file}")
+            except Exception as e:
+                logger.warning(f"Failed to write attempt log: {e}")
+
+        # Convert final state to result with recovery info
+        return self._state_to_result_om(final_state, start_time, log_file)
+
+    async def _run_roma(
+        self,
+        sorry: "SorryLocation",
+        initial_proof: str,
+        file_content: str,
+        goal_state: str,
+        verifier_service: Optional["VerifierService"],
+        rag: Optional[Any],
+        on_step: Optional[callable],
+        start_time: float,
+    ) -> ReActResult:
+        """Run ROMA hierarchical decomposition verification loop."""
+        # Get RAG results if available
+        rag_results = []
+        if rag:
+            try:
+                from agent.rag_query import retrieve_context
+                rag_results = await retrieve_context(sorry, rag)
+                if rag_results and hasattr(rag_results[0], '__dict__'):
+                    rag_results = [vars(r) for r in rag_results]
+            except Exception as e:
+                logger.warning(f"RAG retrieval failed: {e}")
+
+        # Create initial state
+        state = create_initial_state(
+            sorry=sorry,
+            proof_code=initial_proof,
+            file_content=file_content,
+            goal_state=goal_state,
+            rag_results=rag_results,
+            model_used=self.model,
+            temperature=self.temperature,
+            max_attempts=self.max_attempts,
+            mode=AgentMode.ROMA,
+        )
+
+        # Run the ROMA graph
+        try:
+            final_state = await run_roma_verification(
+                initial_state=state,
+                verifier_service=verifier_service,
+                on_step=on_step,
+            )
+        except Exception as e:
+            logger.error(f"ROMA graph error: {e}")
+            return ReActResult(
+                success=False,
+                proof_code=initial_proof,
+                attempts=state.get("attempt_count", 1),
+                elapsed_time=time.time() - start_time,
+                errors=[str(e)],
+                final_status="error",
+                mode=AgentMode.ROMA.value,
+                model_used=self.model,
+            )
+
+        # Build attempt logs including ROMA decomposition info
+        file_path = str(sorry.file_path)
+        attempt_logs = self._build_attempt_logs(final_state, start_time)
+        log_file = None
+        if attempt_logs:
+            try:
+                log_file = write_attempt_log(file_path, attempt_logs, format="json")
+                logger.info(f"Wrote ROMA log to {log_file}")
+            except Exception as e:
+                logger.warning(f"Failed to write attempt log: {e}")
+
+        # Convert final state to result with ROMA info
+        return self._state_to_result_roma(final_state, start_time, log_file)
+
+    def _state_to_result_roma(
+        self,
+        state: ProofState,
+        start_time: float,
+        log_file: Optional[str] = None,
+    ) -> ReActResult:
+        """Convert ProofState to ReActResult with ROMA decomposition info."""
+        result = ReActResult(
+            success=state["status"] == ProofStatus.SUCCESS.value,
+            proof_code=state.get("roma_aggregated_proof") or state["current_proof"],
+            attempts=state["attempt_count"],
+            elapsed_time=time.time() - start_time,
+            thoughts=list(state["thoughts"]),
+            actions=list(state["actions"]),
+            observations=list(state["observations"]),
+            errors=list(state["error_history"]),
+            final_status=state["status"],
+            mode=state["mode"],
+            model_used=state["model_used"],
+            steps=state["step"],
+            log_file=log_file,
+        )
+
+        # Log ROMA-specific info
+        subtask_records = state.get("roma_subtask_records", [])
+        if subtask_records:
+            completed = [r for r in subtask_records if r.get("success")]
+            logger.info(
+                f"ROMA completed with {len(completed)}/{len(subtask_records)} subtasks, "
+                f"complexity={state.get('roma_complexity', 'unknown')}"
+            )
+
+        return result
+
+    def _state_to_result_om(
+        self,
+        state: ProofState,
+        start_time: float,
+        log_file: Optional[str] = None,
+    ) -> ReActResult:
+        """Convert ProofState to ReActResult with OpenManus recovery info."""
+        result = ReActResult(
+            success=state["status"] == ProofStatus.SUCCESS.value,
+            proof_code=state["current_proof"],
+            attempts=state["attempt_count"],
+            elapsed_time=time.time() - start_time,
+            thoughts=list(state["thoughts"]),
+            actions=list(state["actions"]),
+            observations=list(state["observations"]),
+            errors=list(state["error_history"]),
+            final_status=state["status"],
+            mode=state["mode"],
+            model_used=state["model_used"],
+            steps=state["step"],
+            log_file=log_file,
+        )
+
+        # Add recovery-specific info to trace summary
+        recovery_records = state.get("recovery_records", [])
+        if recovery_records:
+            logger.info(
+                f"OM_REACT completed with {len(recovery_records)} recovery attempts, "
+                f"{state.get('recovery_attempts', 0)} total recoveries"
+            )
+
+        return result
+
     def _state_to_result(
         self,
         state: ProofState,
@@ -472,11 +682,11 @@ def get_available_modes() -> list[tuple[str, str, str]]:
         (
             AgentMode.OM_REACT.value,
             "OM ReAct",
-            "ReAct + OpenManus error recovery [Phase 2]",
+            "ReAct + OpenManus error recovery",
         ),
         (
             AgentMode.ROMA.value,
             "ROMA",
-            "Hierarchical decomposition [Phase 3]",
+            "Hierarchical goal decomposition",
         ),
     ]
