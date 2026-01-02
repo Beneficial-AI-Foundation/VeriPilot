@@ -310,7 +310,7 @@ class TacticModifier:
     # Alternative tactics for each common tactic family
     TACTIC_ALTERNATIVES: dict[str, list[str]] = {
         # Heavy automation
-        "grind": ["simp_all", "try omega", "decide", "rfl", "native_decide"],
+        "grind": ["simp_all", "try omega", "decide", "rfl"],  # native_decide FORBIDDEN
         "aesop": ["simp_all", "try grind", "decide"],
 
         # Simplification
@@ -345,7 +345,7 @@ class TacticModifier:
 
         # Finishing
         "trivial": ["try trivial", "try rfl", "try decide"],
-        "decide": ["try native_decide", "rfl", "try trivial"],
+        "decide": ["rfl", "try trivial", "try omega"],  # native_decide FORBIDDEN
         "assumption": ["try assumption", "exact h", "trivial"],
 
         # Scalar tactics (Mathlib)

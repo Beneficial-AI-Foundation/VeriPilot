@@ -147,7 +147,7 @@ class LLMClient:
         model: str = "gemini",
         system_prompt: Optional[str] = None,
         temperature: float = 0.7,
-        max_tokens: int = 8192,  # Increased from 2000 - Lean proofs can be verbose
+        max_tokens: int = 16384,  # Increased for complex proofs (IsZero, Add, etc.)
     ) -> str:
         """
         Generate a response from an LLM.

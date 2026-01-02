@@ -87,16 +87,25 @@ class VerifierService:
         """Get current verifier status."""
         return self._status
 
-    async def start(self) -> None:
+    async def start(self, wait_for_warmup: bool = True) -> None:
         """
         Start the verifier service.
 
-        Begins MCP warm-up in the background. Use status.mcp_available
-        to check if MCP is ready for instant verification.
+        Args:
+            wait_for_warmup: If True (default), wait for MCP to be ready.
+                           If False, warmup runs in background.
         """
-        # Start MCP warm-up in background
+        # Start MCP warm-up
         self._warmup_task = asyncio.create_task(self._warmup_mcp())
-        logger.info("Verifier service started, MCP warming up in background")
+        logger.info("Verifier service started, MCP warming up...")
+
+        if wait_for_warmup:
+            # Wait for warmup to complete before returning
+            await self._warmup_task
+            if self._status.mcp_available:
+                logger.info("MCP ready for instant verification")
+            else:
+                logger.warning("MCP warmup failed - falling back to lake build")
 
     async def stop(self) -> None:
         """Stop the verifier service and clean up."""

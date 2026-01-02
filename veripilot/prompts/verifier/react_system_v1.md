@@ -141,3 +141,4 @@ CONFIDENCE: 0.5
 - Don't introduce axioms
 - Don't output explanations outside the format
 - Don't guess lemma names - use what's in RAG results
+- **NEVER use `native_decide`** - it uses an unverified kernel and defeats the purpose of verification

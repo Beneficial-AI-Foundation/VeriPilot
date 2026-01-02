@@ -433,10 +433,13 @@ async def run_verification(
     # Initialize VerifierService with MCP warm-up in background
     verifier_service = None
     if use_lsp:
-        console.print("[dim]Starting LSP verifier (warming up in background)...[/dim]")
+        console.print("[dim]Starting LSP verifier (warming up MCP)...[/dim]")
         verifier_service = VerifierService(project_dir)
-        await verifier_service.start()
-        console.print("[bold cyan]Verifier:[/bold cyan] LSP (MCP lean-lsp) with lake build fallback")
+        await verifier_service.start(wait_for_warmup=True)  # Wait for MCP to be ready
+        if verifier_service.status.mcp_available:
+            console.print("[bold cyan]Verifier:[/bold cyan] LSP (MCP lean-lsp) ready")
+        else:
+            console.print("[yellow]Verifier:[/yellow] MCP failed, using lake build fallback")
     else:
         console.print("[bold cyan]Verifier:[/bold cyan] lake build")
 
