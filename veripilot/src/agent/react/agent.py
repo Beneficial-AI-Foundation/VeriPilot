@@ -143,6 +143,7 @@ class ReActAgent:
         max_attempts: int = 4,
         model: str = "gemini-3-pro-preview",
         temperature: float = 0.2,
+        project_dir: Optional[str] = None,
     ):
         """
         Initialize ReAct agent.
@@ -152,11 +153,13 @@ class ReActAgent:
             max_attempts: Maximum verification attempts
             model: LLM model for proof generation
             temperature: Base temperature for LLM calls
+            project_dir: Lean project root for import resolution
         """
         self.mode = mode
         self.max_attempts = max_attempts
         self.model = model
         self.temperature = temperature
+        self.project_dir = project_dir
 
     async def verify(
         self,
@@ -167,6 +170,7 @@ class ReActAgent:
         rag: Optional[Any] = None,
         goal_state: str = "",
         on_step: Optional[callable] = None,
+        project_dir: Optional[str] = None,
     ) -> ReActResult:
         """
         Run proof verification with the configured mode.
@@ -179,11 +183,15 @@ class ReActAgent:
             rag: Optional RAG instance for context retrieval
             goal_state: Initial goal state from LSP
             on_step: Optional callback for step updates
+            project_dir: Lean project root (overrides instance default)
 
         Returns:
             ReActResult with verification outcome and trace
         """
         start_time = time.time()
+
+        # Resolve project_dir (parameter takes precedence over instance attribute)
+        resolved_project_dir = project_dir or self.project_dir
 
         # Dispatch based on mode
         if self.mode == AgentMode.JUST_RETRY:
@@ -194,19 +202,19 @@ class ReActAgent:
         elif self.mode == AgentMode.REACT:
             return await self._run_react(
                 sorry, initial_proof, file_content, goal_state,
-                verifier_service, rag, on_step, start_time
+                verifier_service, rag, on_step, start_time, resolved_project_dir
             )
         elif self.mode == AgentMode.OM_REACT:
             # OpenManus error recovery mode
             return await self._run_om_react(
                 sorry, initial_proof, file_content, goal_state,
-                verifier_service, rag, on_step, start_time
+                verifier_service, rag, on_step, start_time, resolved_project_dir
             )
         elif self.mode == AgentMode.ROMA:
             # ROMA hierarchical decomposition mode
             return await self._run_roma(
                 sorry, initial_proof, file_content, goal_state,
-                verifier_service, rag, on_step, start_time
+                verifier_service, rag, on_step, start_time, resolved_project_dir
             )
         else:
             raise ValueError(f"Unknown mode: {self.mode}")
@@ -281,6 +289,7 @@ class ReActAgent:
         rag: Optional[Any],
         on_step: Optional[callable],
         start_time: float,
+        project_dir: Optional[str] = None,
     ) -> ReActResult:
         """Run ReAct verification loop."""
         # Get RAG results if available
@@ -306,6 +315,7 @@ class ReActAgent:
             temperature=self.temperature,
             max_attempts=self.max_attempts,
             mode=AgentMode.REACT,
+            project_dir=project_dir,
         )
 
         # Run the graph
@@ -352,6 +362,7 @@ class ReActAgent:
         rag: Optional[Any],
         on_step: Optional[callable],
         start_time: float,
+        project_dir: Optional[str] = None,
     ) -> ReActResult:
         """Run OpenManus-enhanced ReAct verification loop."""
         # Get RAG results if available
@@ -376,6 +387,7 @@ class ReActAgent:
             temperature=self.temperature,
             max_attempts=self.max_attempts,
             mode=AgentMode.OM_REACT,
+            project_dir=project_dir,
         )
 
         # Run the OpenManus-enhanced graph
@@ -422,6 +434,7 @@ class ReActAgent:
         rag: Optional[Any],
         on_step: Optional[callable],
         start_time: float,
+        project_dir: Optional[str] = None,
     ) -> ReActResult:
         """Run ROMA hierarchical decomposition verification loop."""
         # Get RAG results if available
@@ -446,6 +459,7 @@ class ReActAgent:
             temperature=self.temperature,
             max_attempts=self.max_attempts,
             mode=AgentMode.ROMA,
+            project_dir=project_dir,
         )
 
         # Run the ROMA graph
@@ -618,6 +632,7 @@ async def verify_with_react(
     rag: Optional[Any] = None,
     mode: AgentMode = AgentMode.REACT,
     max_attempts: int = 4,
+    project_dir: Optional[str] = None,
 ) -> "VerificationResult":
     """
     Verify a proof using ReAct agent (convenience function).
@@ -632,6 +647,7 @@ async def verify_with_react(
         rag: Optional RAG instance
         mode: Agent mode (default: REACT)
         max_attempts: Maximum attempts
+        project_dir: Lean project root for import resolution
 
     Returns:
         VerificationResult for compatibility
@@ -648,6 +664,7 @@ async def verify_with_react(
         max_attempts=max_attempts,
         model=proof_result.model_used,
         temperature=proof_result.temperature,
+        project_dir=project_dir,
     )
 
     result = await agent.verify(
@@ -656,6 +673,7 @@ async def verify_with_react(
         file_content=file_content,
         verifier_service=verifier_service,
         rag=rag,
+        project_dir=project_dir,
     )
 
     return result.to_verification_result()

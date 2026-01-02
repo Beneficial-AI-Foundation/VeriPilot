@@ -127,6 +127,8 @@ class ProofState(TypedDict):
     # === Context ===
     rag_results: list[dict]                # RAG retrieval results
     error_history: Annotated[list[str], operator.add]  # All errors encountered
+    project_dir: Optional[str]             # Lean project root directory
+    import_context: str                    # Formatted import file contents
 
     # === Metadata ===
     model_used: str                         # Primary LLM model
@@ -182,6 +184,7 @@ def create_initial_state(
     temperature: float = 0.2,
     max_attempts: int = 4,
     mode: AgentMode = AgentMode.REACT,
+    project_dir: Optional[str] = None,
 ) -> ProofState:
     """
     Create initial ProofState for a verification run.
@@ -196,11 +199,27 @@ def create_initial_state(
         temperature: Base temperature for generation
         max_attempts: Maximum verification attempts
         mode: Agent mode (REACT, OM_REACT, ROMA)
+        project_dir: Lean project root for import resolution (optional)
 
     Returns:
         ProofState ready for graph invocation
     """
     import time
+
+    # Load import file contents if project_dir is provided
+    import_context = ""
+    if project_dir and sorry.imports:
+        try:
+            from agent.context_formatter import format_import_contents
+            import_context = format_import_contents(
+                sorry.imports,
+                project_dir,
+                max_lines_per_file=150,
+                max_total_lines=500,
+            )
+        except Exception:
+            # Gracefully handle import loading failures
+            pass
 
     return ProofState(
         # Core context
@@ -227,6 +246,8 @@ def create_initial_state(
         # Context
         rag_results=rag_results or [],
         error_history=[],
+        project_dir=project_dir,
+        import_context=import_context,
 
         # Metadata
         model_used=model_used,

@@ -214,6 +214,13 @@ def _build_reasoning_prompt(state: ProofState) -> str:
                 lines.append(f"- `{name}`: {sig}")
         lines.append("")
 
+    # Add import file context if available
+    if state.get("import_context"):
+        lines.extend([
+            state["import_context"],  # Already formatted as markdown
+            "",
+        ])
+
     # Instructions
     lines.extend([
         "## Instructions",

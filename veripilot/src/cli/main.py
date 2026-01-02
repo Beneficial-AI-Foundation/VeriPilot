@@ -528,6 +528,7 @@ async def run_verification(
                         max_attempts=MAX_ATTEMPTS,
                         model=model,
                         temperature=temperature,
+                        project_dir=project_dir,
                     )
                     react_result = await react_agent.verify(
                         sorry=sorry,
@@ -535,6 +536,7 @@ async def run_verification(
                         file_content=file_content,
                         verifier_service=verifier_service,
                         rag=rag,
+                        project_dir=project_dir,
                     )
                     # Convert to VerificationResult for consistent handling
                     verification = react_result.to_verification_result()
