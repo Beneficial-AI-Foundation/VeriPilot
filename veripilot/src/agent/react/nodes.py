@@ -24,6 +24,8 @@ from .state import (
     ActionRecord,
     ObservationRecord,
     RecoveryRecord,
+    HypothesisInfo,
+    GoalAnalysis,
     add_thought,
     add_action,
     add_observation,
@@ -86,6 +88,272 @@ CONFIDENCE: <0.0-1.0>
 Use `try grind`, `try omega`, `try ring` for safety. Use `rw [h]` to rewrite with hypotheses."""
 
     return _REACT_SYSTEM_PROMPT_CACHE
+
+
+# ==============================================================================
+# Goal State Parser (Phase 4.0)
+# ==============================================================================
+
+import re
+
+
+def _extract_hypotheses(goal_state: str, max_hypotheses: int = 50) -> list[HypothesisInfo]:
+    """
+    Extract hypothesis information from a Lean goal state.
+
+    Parses lines of the form:
+        hypothesis_name : type_expression
+
+    Args:
+        goal_state: Raw goal state string from LSP
+        max_hypotheses: Maximum number to parse (for performance)
+
+    Returns:
+        List of HypothesisInfo dictionaries
+    """
+    hypotheses = []
+
+    # Split at ⊢ to separate hypotheses from goal
+    parts = goal_state.split("⊢")
+    if len(parts) < 2:
+        # Try alternate formats
+        parts = goal_state.split("|-")
+
+    hyp_section = parts[0] if parts else goal_state
+
+    # Pattern to match hypothesis declarations
+    # Matches: name : type (possibly multi-line with indentation)
+    hyp_pattern = re.compile(
+        r'^([a-zA-Z_][a-zA-Z0-9_\']*)\s*:\s*(.+?)(?=\n[a-zA-Z_]|\n⊢|\Z)',
+        re.MULTILINE | re.DOTALL
+    )
+
+    # Also try simpler line-by-line parsing
+    lines = hyp_section.strip().split('\n')
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith('--'):
+            continue
+
+        # Match "name : type"
+        match = re.match(r'^([a-zA-Z_][a-zA-Z0-9_\']*)\s*:\s*(.+)$', line)
+        if match:
+            name = match.group(1)
+            type_str = match.group(2).strip()
+
+            # Detect if this is an equation (contains = but not in ≤ or ≥)
+            is_equation = bool(re.search(r'(?<![<>≤≥!])=(?![=])', type_str))
+
+            # Detect if this is a bound (contains < or > or ≤ or ≥)
+            is_bound = bool(re.search(r'[<>≤≥]', type_str))
+
+            hypotheses.append(HypothesisInfo(
+                name=name,
+                type_str=type_str[:200],  # Truncate long types
+                is_equation=is_equation,
+                is_bound=is_bound,
+            ))
+
+            if len(hypotheses) >= max_hypotheses:
+                break
+
+    return hypotheses
+
+
+def _classify_goal_type(goal_state: str) -> tuple[str, str]:
+    """
+    Classify the type of goal and extract the goal expression.
+
+    Returns:
+        (goal_type, goal_expr) where goal_type is one of:
+        - "equality": Goal is a = b
+        - "implication": Goal is A → B
+        - "forall": Goal is ∀ x, P x
+        - "exists": Goal is ∃ x, P x
+        - "conjunction": Goal is A ∧ B
+        - "disjunction": Goal is A ∨ B
+        - "other": Unknown structure
+    """
+    # Extract goal expression after ⊢
+    goal_expr = ""
+    if "⊢" in goal_state:
+        goal_expr = goal_state.split("⊢", 1)[1].strip()
+    elif "|-" in goal_state:
+        goal_expr = goal_state.split("|-", 1)[1].strip()
+    else:
+        goal_expr = goal_state.strip()
+
+    # Clean up multiline goals
+    goal_expr = ' '.join(goal_expr.split())
+
+    # Classify based on top-level structure
+    goal_clean = goal_expr.strip()
+
+    # Check for forall (∀ or unicode variants)
+    if goal_clean.startswith("∀") or goal_clean.startswith("forall"):
+        return "forall", goal_expr
+
+    # Check for exists (∃)
+    if goal_clean.startswith("∃") or goal_clean.startswith("exists"):
+        return "exists", goal_expr
+
+    # Check for implication at top level (→ not inside parentheses)
+    # Simple heuristic: if → appears and is not deeply nested
+    if "→" in goal_clean or "->" in goal_clean:
+        # Count nesting depth
+        depth = 0
+        for i, c in enumerate(goal_clean):
+            if c in "([{":
+                depth += 1
+            elif c in ")]}":
+                depth -= 1
+            elif c == "→" and depth == 0:
+                return "implication", goal_expr
+
+    # Check for equality at top level
+    if re.search(r'(?<![<>≤≥!])=(?![=])', goal_clean):
+        return "equality", goal_expr
+
+    # Check for conjunction/disjunction
+    if "∧" in goal_clean or "/\\" in goal_clean:
+        return "conjunction", goal_expr
+    if "∨" in goal_clean or "\\/" in goal_clean:
+        return "disjunction", goal_expr
+
+    return "other", goal_expr
+
+
+def _find_rewrite_candidates(hypotheses: list[HypothesisInfo]) -> list[str]:
+    """
+    Find hypotheses that can be used with `rw [h]`.
+
+    Rewrite candidates are hypotheses of the form h : a = b.
+    """
+    return [h["name"] for h in hypotheses if h["is_equation"]]
+
+
+def _find_bound_hypotheses(hypotheses: list[HypothesisInfo]) -> list[str]:
+    """
+    Find hypotheses that represent bounds (h : x < N).
+    """
+    return [h["name"] for h in hypotheses if h["is_bound"]]
+
+
+def _find_definitions_in_scope(goal_state: str) -> list[str]:
+    """
+    Extract definition names that might need unfolding.
+
+    Looks for CamelCase identifiers that are likely definitions.
+    """
+    definitions = set()
+
+    # Pattern for CamelCase or snake_case_with_caps identifiers
+    # These are likely user-defined definitions
+    pattern = re.compile(r'\b([A-Z][a-zA-Z0-9_]*(?:_[a-zA-Z0-9]+)*)\b')
+
+    for match in pattern.finditer(goal_state):
+        name = match.group(1)
+        # Filter out common non-definition patterns
+        if name not in {"True", "False", "Type", "Prop", "Sort", "Nat", "Int", "Bool"}:
+            definitions.add(name)
+
+    # Also look for specific patterns like "as_Nat", "as_Int"
+    pattern2 = re.compile(r'\b([a-zA-Z_]+_as_[A-Za-z]+)\b')
+    for match in pattern2.finditer(goal_state):
+        definitions.add(match.group(1))
+
+    return sorted(list(definitions))[:20]  # Limit to 20
+
+
+def _summarize_goal(goal_type: str, goal_expr: str, hyp_count: int) -> str:
+    """
+    Create a one-line summary of the goal for prompts.
+    """
+    goal_short = goal_expr[:100] + "..." if len(goal_expr) > 100 else goal_expr
+
+    if goal_type == "equality":
+        return f"Prove equality with {hyp_count} hypotheses: {goal_short}"
+    elif goal_type == "implication":
+        return f"Prove implication with {hyp_count} hypotheses: {goal_short}"
+    elif goal_type == "forall":
+        return f"Prove universal statement with {hyp_count} hypotheses: {goal_short}"
+    elif goal_type == "exists":
+        return f"Prove existential with {hyp_count} hypotheses: {goal_short}"
+    else:
+        return f"Prove goal ({goal_type}) with {hyp_count} hypotheses: {goal_short}"
+
+
+def parse_goal_state(goal_state: str) -> GoalAnalysis:
+    """
+    Parse a Lean goal state into structured analysis.
+
+    This is the main entry point for goal parsing.
+
+    Args:
+        goal_state: Raw goal state string from LSP
+
+    Returns:
+        GoalAnalysis with extracted information
+    """
+    if not goal_state or not goal_state.strip():
+        return GoalAnalysis(
+            hypotheses=[],
+            goal_type="other",
+            goal_expr="",
+            rewrite_candidates=[],
+            bound_hypotheses=[],
+            definitions_in_scope=[],
+            goal_summary="No goal state available",
+            hypothesis_count=0,
+        )
+
+    hypotheses = _extract_hypotheses(goal_state)
+    goal_type, goal_expr = _classify_goal_type(goal_state)
+    rewrite_candidates = _find_rewrite_candidates(hypotheses)
+    bound_hypotheses = _find_bound_hypotheses(hypotheses)
+    definitions = _find_definitions_in_scope(goal_state)
+    summary = _summarize_goal(goal_type, goal_expr, len(hypotheses))
+
+    return GoalAnalysis(
+        hypotheses=hypotheses,
+        goal_type=goal_type,
+        goal_expr=goal_expr,
+        rewrite_candidates=rewrite_candidates,
+        bound_hypotheses=bound_hypotheses,
+        definitions_in_scope=definitions,
+        goal_summary=summary,
+        hypothesis_count=len(hypotheses),
+    )
+
+
+def goal_parser_node(state: ProofState) -> dict[str, Any]:
+    """
+    Parse the current goal state into structured analysis.
+
+    This node runs at the start of each proof attempt to extract
+    hypothesis information, goal type, and rewrite candidates.
+
+    Returns:
+        Partial state update with goal_analysis
+    """
+    goal_state = state.get("goal_state", "")
+
+    # Parse the goal state
+    analysis = parse_goal_state(goal_state)
+
+    logger.debug(
+        f"Goal parsed: type={analysis['goal_type']}, "
+        f"hypotheses={analysis['hypothesis_count']}, "
+        f"rewrite_candidates={len(analysis['rewrite_candidates'])}"
+    )
+
+    # Store previous goal state for progress tracking
+    previous_goal = state.get("goal_state", "")
+
+    return {
+        "goal_analysis": dict(analysis),  # Convert TypedDict to dict for JSON serialization
+        "previous_goal_state": previous_goal,
+    }
 
 
 # ==============================================================================
@@ -184,6 +452,64 @@ def _build_reasoning_prompt(state: ProofState) -> str:
             "",
         ])
 
+    # Add structured goal analysis if available (Phase 4.0)
+    goal_analysis = state.get("goal_analysis")
+    if goal_analysis:
+        lines.extend([
+            "## Goal Analysis",
+            f"- **Goal Type:** {goal_analysis.get('goal_type', 'unknown')}",
+            f"- **Summary:** {goal_analysis.get('goal_summary', 'N/A')}",
+            "",
+        ])
+
+        # Add rewrite candidates (hypotheses of form h : a = b)
+        rewrite_candidates = goal_analysis.get("rewrite_candidates", [])
+        if rewrite_candidates:
+            lines.extend([
+                "### Rewrite Candidates (h : a = b)",
+                "These hypotheses can be used with `rw [h]`:",
+            ])
+            for h in rewrite_candidates[:10]:
+                lines.append(f"- `{h}`")
+            lines.append("")
+
+        # Add bound hypotheses (h : x < N)
+        bound_hyps = goal_analysis.get("bound_hypotheses", [])
+        if bound_hyps:
+            lines.extend([
+                "### Bound Hypotheses (h : x < N)",
+                "Useful for `omega`, `linarith`, or bounds reasoning:",
+            ])
+            for h in bound_hyps[:10]:
+                lines.append(f"- `{h}`")
+            lines.append("")
+
+        # Add definitions that might need unfolding
+        definitions = goal_analysis.get("definitions_in_scope", [])
+        if definitions:
+            lines.extend([
+                "### Definitions in Scope",
+                "Consider unfolding with `simp only [def]` or `unfold def`:",
+            ])
+            for d in definitions[:10]:
+                lines.append(f"- `{d}`")
+            lines.append("")
+
+        # Add hypothesis names for reference
+        hypotheses = goal_analysis.get("hypotheses", [])
+        if hypotheses:
+            lines.extend([
+                "### Available Hypotheses",
+                "All hypotheses by name (use specific names instead of `[*]`):",
+            ])
+            for hyp in hypotheses[:15]:
+                name = hyp.get("name", "")
+                type_str = hyp.get("type_str", "")[:60]
+                lines.append(f"- `{name}` : {type_str}")
+            if len(hypotheses) > 15:
+                lines.append(f"  ... and {len(hypotheses) - 15} more")
+            lines.append("")
+
     # Add error history (last 3)
     if state["error_history"]:
         lines.extend([
@@ -221,17 +547,45 @@ def _build_reasoning_prompt(state: ProofState) -> str:
             "",
         ])
 
-    # Instructions
+    # Instructions - enhanced with goal analysis guidance
     lines.extend([
         "## Instructions",
         "",
         "Think step-by-step about what tactic to try next.",
         "Consider:",
         "1. What went wrong in previous attempts?",
-        "2. What automation tactics might help? (grind, simp, omega, scalar_tac)",
-        "3. Do we need to unfold definitions?",
-        "4. Should we use progress* for Aeneas code?",
+        "2. **Use specific hypothesis names** (e.g., `rw [h_eq]`) instead of wildcards (`rw [*]`)",
+        "3. What automation tactics might help? (grind, simp, omega, scalar_tac)",
+        "4. Do we need to unfold definitions listed above?",
+        "5. Should we use progress* for Aeneas code?",
         "",
+    ])
+
+    # Add goal-type specific hints
+    if goal_analysis:
+        goal_type = goal_analysis.get("goal_type", "other")
+        if goal_type == "equality":
+            lines.extend([
+                "**Hint (equality goal):** Try `rfl`, `ring`, `simp`, or rewrite with hypotheses.",
+                "",
+            ])
+        elif goal_type == "implication":
+            lines.extend([
+                "**Hint (implication goal):** Consider `intro h` to introduce the assumption.",
+                "",
+            ])
+        elif goal_type == "forall":
+            lines.extend([
+                "**Hint (universal goal):** Use `intro x` to introduce the variable.",
+                "",
+            ])
+        elif goal_type == "exists":
+            lines.extend([
+                "**Hint (existential goal):** Use `use <witness>` to provide the witness.",
+                "",
+            ])
+
+    lines.extend([
         "## Output Format",
         "",
         "THOUGHT: <your reasoning about what to try>",

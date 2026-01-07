@@ -89,6 +89,53 @@ class SubTaskRecord(TypedDict):
     error: Optional[str]            # Error if failed
 
 
+class HypothesisInfo(TypedDict):
+    """Information about a single hypothesis in the goal state."""
+
+    name: str                       # Hypothesis name (e.g., "h_limbs0")
+    type_str: str                   # Type as string (e.g., "limbs0 < 2^51")
+    is_equation: bool               # True if hypothesis is an equation (h : a = b)
+    is_bound: bool                  # True if looks like a bound (h : x < N)
+
+
+class GoalAnalysis(TypedDict):
+    """
+    Parsed analysis of a Lean goal state.
+
+    Provides structured information extracted from raw goal state strings,
+    enabling targeted tactic selection instead of wildcard patterns.
+
+    Example:
+        goal_analysis = parse_goal_state(goal_state)
+        rewrite_candidates = goal_analysis["rewrite_candidates"]
+        # Use specific hypotheses: rw [h_limbs0] instead of rw [*]
+    """
+
+    hypotheses: list[HypothesisInfo]    # All parsed hypotheses
+    goal_type: str                       # "equality" | "implication" | "forall" | "exists" | "other"
+    goal_expr: str                       # The goal expression after ⊢
+    rewrite_candidates: list[str]        # Hypothesis names usable with rw (h : a = b)
+    bound_hypotheses: list[str]          # Hypothesis names that are bounds
+    definitions_in_scope: list[str]      # Definitions that might need unfolding
+    goal_summary: str                    # One-line summary for prompt
+    hypothesis_count: int                # Total number of hypotheses
+
+
+class ProofStrategy(TypedDict):
+    """
+    Proof strategy generated before tactic selection.
+
+    Two-phase prompting: Strategy first, then tactics based on strategy.
+    """
+
+    approach: str                        # "direct" | "induction" | "case_split" | "lemma" | "rewriting"
+    key_hypotheses: list[str]           # Hypotheses critical for this proof
+    intermediate_steps: list[str]       # Helper lemmas needed (have statements)
+    tactic_plan: list[str]              # Ordered list of planned tactics
+    reasoning: str                       # Why this approach was chosen
+    confidence: float                    # 0.0-1.0 confidence in strategy
+
+
 class ProofState(TypedDict):
     """
     LangGraph state for proof verification.
@@ -129,6 +176,13 @@ class ProofState(TypedDict):
     error_history: Annotated[list[str], operator.add]  # All errors encountered
     project_dir: Optional[str]             # Lean project root directory
     import_context: str                    # Formatted import file contents
+
+    # === Goal Analysis (Phase 4.0) ===
+    goal_analysis: Optional[dict]          # GoalAnalysis parsed from goal_state
+    previous_goal_state: str               # For tracking progress between attempts
+
+    # === Proof Strategy (Phase 4.1) ===
+    proof_strategy: Optional[dict]         # ProofStrategy for current proof attempt
 
     # === Metadata ===
     model_used: str                         # Primary LLM model
@@ -248,6 +302,13 @@ def create_initial_state(
         error_history=[],
         project_dir=project_dir,
         import_context=import_context,
+
+        # Goal Analysis (Phase 4.0)
+        goal_analysis=None,
+        previous_goal_state="",
+
+        # Proof Strategy (Phase 4.1)
+        proof_strategy=None,
 
         # Metadata
         model_used=model_used,

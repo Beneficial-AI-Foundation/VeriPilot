@@ -33,6 +33,8 @@ from .nodes import (
     increment_attempt_node,
     success_node,
     failed_node,
+    # Phase 4.0: Goal parsing
+    goal_parser_node,
     # ROMA nodes
     complexity_analysis_node,
     atomizer_node,
@@ -77,6 +79,9 @@ def create_react_graph(
     # Add Nodes
     # =========================================================================
 
+    # Goal parser node (Phase 4.0) - parses goal state for structured analysis
+    graph.add_node("goal_parser", goal_parser_node)
+
     # Reasoning node - async, generates thought and plans tactic
     graph.add_node("reasoning", reasoning_node)
 
@@ -104,8 +109,9 @@ def create_react_graph(
     # Add Edges
     # =========================================================================
 
-    # Linear flow: START → reasoning → execution → observation
-    graph.add_edge(START, "reasoning")
+    # Linear flow: START → goal_parser → reasoning → execution → observation
+    graph.add_edge(START, "goal_parser")
+    graph.add_edge("goal_parser", "reasoning")
     graph.add_edge("reasoning", "execution")
     graph.add_edge("execution", "observation")
 
@@ -190,6 +196,9 @@ def create_om_react_graph(
     # Add Nodes
     # =========================================================================
 
+    # Goal parser node (Phase 4.0) - parses goal state for structured analysis
+    graph.add_node("goal_parser", goal_parser_node)
+
     # Reasoning node - async, generates thought and plans tactic
     graph.add_node("reasoning", reasoning_node)
 
@@ -222,8 +231,9 @@ def create_om_react_graph(
     # Add Edges
     # =========================================================================
 
-    # Linear flow: START → reasoning → execution → observation
-    graph.add_edge(START, "reasoning")
+    # Linear flow: START → goal_parser → reasoning → execution → observation
+    graph.add_edge(START, "goal_parser")
+    graph.add_edge("goal_parser", "reasoning")
     graph.add_edge("reasoning", "execution")
     graph.add_edge("execution", "observation")
 
@@ -395,6 +405,9 @@ def create_roma_graph(
     # Add Nodes
     # =========================================================================
 
+    # Goal parser node (Phase 4.0) - parses goal state for structured analysis
+    graph.add_node("goal_parser", goal_parser_node)
+
     # Complexity analysis node
     graph.add_node("complexity_analysis", complexity_analysis_node)
 
@@ -436,8 +449,9 @@ def create_roma_graph(
     # Add Edges
     # =========================================================================
 
-    # Entry: START -> complexity_analysis -> atomizer
-    graph.add_edge(START, "complexity_analysis")
+    # Entry: START -> goal_parser -> complexity_analysis -> atomizer
+    graph.add_edge(START, "goal_parser")
+    graph.add_edge("goal_parser", "complexity_analysis")
     graph.add_edge("complexity_analysis", "atomizer")
 
     # Atomizer decision routing
