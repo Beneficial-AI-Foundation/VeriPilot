@@ -205,6 +205,13 @@ class ProofState(TypedDict):
     definitions_to_unfold: list[str]        # Definitions identified for unfolding
     recovery_records: Annotated[list[RecoveryRecord], operator.add]  # Recovery trace
 
+    # === Iterative Refinement Fields (Phase 4.4) ===
+    tactic_sequence: Annotated[list[str], operator.add]  # Tactics applied successfully
+    goal_state_history: list[str]           # Goal state after each tactic
+    tactic_step: int                        # Current step in tactic loop
+    max_tactic_steps: int                   # Max tactics per attempt (default 15)
+    consecutive_failures: int               # Counter for adaptive re-analysis trigger
+
     # === ROMA Hierarchical Decomposition Fields ===
     roma_active: bool                       # Whether ROMA decomposition is active
     roma_complexity: Optional[str]          # GoalComplexity value (atomic/simple/moderate/complex)
@@ -329,6 +336,13 @@ def create_initial_state(
         successful_tactics=[],
         definitions_to_unfold=[],
         recovery_records=[],
+
+        # Iterative Refinement (Phase 4.4)
+        tactic_sequence=[],
+        goal_state_history=[],
+        tactic_step=0,
+        max_tactic_steps=15,
+        consecutive_failures=0,
 
         # ROMA Hierarchical Decomposition (initialized fresh)
         roma_active=False,

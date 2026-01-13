@@ -357,6 +357,300 @@ def goal_parser_node(state: ProofState) -> dict[str, Any]:
 
 
 # ==============================================================================
+# Iterative Tactic Loop (Phase 4.4)
+# ==============================================================================
+
+
+async def iterative_tactic_loop(
+    goal_state: str,
+    file_path: str,
+    line: int,
+    model: str,
+    temperature: float = 0.2,
+    max_steps: int = 15,
+    consecutive_failure_threshold: int = 3,
+    context: Optional[dict[str, Any]] = None,
+) -> tuple[list[str], bool, str]:
+    """
+    Iteratively apply tactics using MCP multi_attempt for non-destructive testing.
+
+    This is the core iterative refinement loop that addresses the "single-shot"
+    architecture limitation. Instead of generating all tactics in one shot,
+    it generates one tactic at a time, tests it, and re-evaluates based on
+    the actual goal state change.
+
+    Args:
+        goal_state: Current goal state from LSP
+        file_path: Absolute path to the Lean file
+        line: Line number where tactic should be applied (1-indexed)
+        model: LLM model to use for tactic generation
+        temperature: Temperature for LLM generation
+        max_steps: Maximum number of tactics to try (default 15)
+        consecutive_failure_threshold: Re-analyze after N consecutive failures
+        context: Optional additional context (theorem_name, hypotheses, etc.)
+
+    Returns:
+        Tuple of (tactics_applied, success, final_goal_state):
+        - tactics_applied: List of tactics that succeeded (changed goal state)
+        - success: True if goal was closed ("no goals")
+        - final_goal_state: The final goal state after all tactics
+
+    Design:
+        Uses "adaptive re-analysis" - lightweight checks after each tactic
+        (did goal change? any goals left?), escalates to full re-analysis
+        (re-parse goal, reconsider strategy) after consecutive failures.
+    """
+    from agent.llm_client import LLMClient
+    from verifier.mcp_client import get_mcp_client
+
+    tactics_applied: list[str] = []
+    current_goal = goal_state
+    consecutive_failures = 0
+    llm_client = LLMClient()
+    mcp_client = get_mcp_client()
+
+    logger.info(f"Starting iterative tactic loop: max_steps={max_steps}")
+
+    for step in range(max_steps):
+        # Check if goal is already closed
+        if _is_goal_closed(current_goal):
+            logger.info(f"Goal closed after {step} steps")
+            return tactics_applied, True, current_goal
+
+        # Check if we need full re-analysis
+        needs_reanalysis = consecutive_failures >= consecutive_failure_threshold
+        if needs_reanalysis:
+            logger.info(f"Triggering re-analysis after {consecutive_failures} failures")
+            consecutive_failures = 0  # Reset counter
+
+        # Generate candidate tactics
+        candidates = await _generate_tactic_candidates(
+            goal_state=current_goal,
+            model=model,
+            temperature=temperature,
+            context=context,
+            deep_analysis=needs_reanalysis,
+            tried_tactics=tactics_applied,
+        )
+
+        if not candidates:
+            logger.warning(f"No tactic candidates generated at step {step}")
+            consecutive_failures += 1
+            continue
+
+        # Try candidates using multi_attempt (non-destructive)
+        try:
+            results = await mcp_client.multi_attempt(
+                file_path=file_path,
+                line=line,
+                snippets=candidates,
+            )
+        except Exception as e:
+            logger.warning(f"multi_attempt failed: {e}")
+            consecutive_failures += 1
+            continue
+
+        # Evaluate results - find first successful tactic
+        success_found = False
+        for i, result in enumerate(results):
+            tactic = candidates[i] if i < len(candidates) else "unknown"
+
+            # Check if this tactic made progress
+            new_goal = _extract_goal_from_result(result)
+            if new_goal and _made_progress(current_goal, new_goal):
+                tactics_applied.append(tactic)
+                current_goal = new_goal
+                consecutive_failures = 0
+                success_found = True
+                logger.info(f"Step {step}: '{tactic[:50]}...' succeeded")
+
+                # Check if goal is now closed
+                if _is_goal_closed(new_goal):
+                    logger.info(f"Goal closed by tactic: {tactic[:50]}...")
+                    return tactics_applied, True, current_goal
+                break
+
+        if not success_found:
+            consecutive_failures += 1
+            logger.debug(f"Step {step}: No tactic succeeded, failures={consecutive_failures}")
+
+    # Max steps reached
+    logger.info(f"Max steps ({max_steps}) reached, applied {len(tactics_applied)} tactics")
+    return tactics_applied, False, current_goal
+
+
+def _is_goal_closed(goal_state: str) -> bool:
+    """Check if the goal state indicates no remaining goals."""
+    if not goal_state:
+        return False
+    goal_lower = goal_state.lower().strip()
+    return (
+        "no goals" in goal_lower
+        or goal_lower == "goals accomplished"
+        or goal_lower == ""
+    )
+
+
+def _extract_goal_from_result(result: dict[str, Any]) -> Optional[str]:
+    """Extract goal state from multi_attempt result."""
+    if not result:
+        return None
+    # multi_attempt returns goal state for each tactic
+    # Format may vary - try common keys
+    for key in ["goal_state", "goals_after", "goal", "result"]:
+        if key in result:
+            return str(result[key])
+    return None
+
+
+def _made_progress(old_goal: str, new_goal: str) -> bool:
+    """
+    Check if the goal state changed (tactic made progress).
+
+    Progress is defined as:
+    - Goal state is different from before
+    - Goal state is not an error message
+    - Goal is closed (no goals) or changed meaningfully
+    """
+    if not new_goal:
+        return False
+
+    # Check for error indicators
+    error_indicators = ["error", "unknown identifier", "type mismatch", "failed"]
+    new_lower = new_goal.lower()
+    if any(err in new_lower for err in error_indicators):
+        return False
+
+    # Goal closed = progress
+    if _is_goal_closed(new_goal):
+        return True
+
+    # Different goal state = progress (but not if it's just whitespace changes)
+    old_normalized = old_goal.strip()
+    new_normalized = new_goal.strip()
+    return old_normalized != new_normalized
+
+
+async def _generate_tactic_candidates(
+    goal_state: str,
+    model: str,
+    temperature: float,
+    context: Optional[dict[str, Any]],
+    deep_analysis: bool,
+    tried_tactics: list[str],
+) -> list[str]:
+    """
+    Generate candidate tactics for the current goal state.
+
+    Args:
+        goal_state: Current goal state
+        model: LLM model to use
+        temperature: Temperature for generation
+        context: Additional context (theorem_name, etc.)
+        deep_analysis: If True, do full re-analysis (more thorough)
+        tried_tactics: Tactics already tried (to avoid repetition)
+
+    Returns:
+        List of 3-5 candidate tactics to try
+    """
+    from agent.llm_client import LLMClient
+
+    llm_client = LLMClient()
+
+    # Build prompt for tactic generation
+    prompt_lines = [
+        "Generate 3-5 Lean 4 tactics to try on this goal state.",
+        "Each tactic should be on a separate line, starting with `-`.",
+        "Tactics should be specific and targeted based on the goal structure.",
+        "",
+        "## Current Goal State",
+        "```lean",
+        goal_state,
+        "```",
+        "",
+    ]
+
+    # Add context if available
+    if context:
+        if "theorem_name" in context:
+            prompt_lines.append(f"**Theorem:** {context['theorem_name']}")
+        if "hypotheses" in context:
+            prompt_lines.append(f"**Key Hypotheses:** {context['hypotheses']}")
+        prompt_lines.append("")
+
+    # Add tried tactics to avoid repetition
+    if tried_tactics:
+        prompt_lines.extend([
+            "## Tactics Already Tried (do not repeat)",
+            "\n".join(f"- {t}" for t in tried_tactics[-5:]),
+            "",
+        ])
+
+    # Add guidance based on analysis depth
+    if deep_analysis:
+        prompt_lines.extend([
+            "## Re-analysis Mode",
+            "Previous tactics failed repeatedly. Reconsider the approach:",
+            "- Look for patterns in the goal that suggest specific tactics",
+            "- Consider unfolding definitions",
+            "- Consider using hypotheses by name (rw, simp only)",
+            "- Consider intermediate lemmas (have h := ...)",
+            "",
+        ])
+
+    # Add output format
+    prompt_lines.extend([
+        "## Output Format",
+        "List exactly 3-5 tactics, one per line, starting with `-`:",
+        "- tactic1",
+        "- tactic2",
+        "- etc.",
+    ])
+
+    prompt = "\n".join(prompt_lines)
+
+    # Generate with slightly higher temperature for diversity
+    gen_temp = min(0.7, temperature + 0.1)
+
+    try:
+        response = await llm_client.generate(
+            prompt,
+            model=model,
+            temperature=gen_temp,
+        )
+
+        # Parse tactics from response
+        tactics = _parse_tactic_list(response)
+        return tactics[:5]  # Max 5
+
+    except Exception as e:
+        logger.warning(f"Tactic generation failed: {e}")
+        # Return some default tactics
+        return ["simp", "ring", "omega"]
+
+
+def _parse_tactic_list(response: str) -> list[str]:
+    """Parse list of tactics from LLM response."""
+    tactics = []
+    for line in response.split("\n"):
+        line = line.strip()
+        # Look for lines starting with - or *
+        if line.startswith("-") or line.startswith("*"):
+            tactic = line[1:].strip()
+            # Remove backticks if present
+            tactic = tactic.strip("`")
+            if tactic:
+                tactics.append(tactic)
+        # Also accept numbered lists
+        elif line and line[0].isdigit() and "." in line[:3]:
+            tactic = line.split(".", 1)[1].strip()
+            tactic = tactic.strip("`")
+            if tactic:
+                tactics.append(tactic)
+    return tactics
+
+
+# ==============================================================================
 # Reasoning Node
 # ==============================================================================
 
@@ -1306,32 +1600,56 @@ async def subtask_executor_node(
 
     sorry = dict_to_sorry(state["sorry_location"])
     success = False
-    tactics_used = []
-    error = None
+    tactics_used: list[str] = []
+    error: Optional[str] = None
+    final_goal = state.get("goal_state", "")
 
-    # Try suggested tactics
-    for tactic in subtask_data.get("suggested_tactics", [])[:5]:  # Max 5 tactics
-        tactics_used.append(tactic)
+    # Get initial goal state for this subtask
+    # Use current goal_state or subtask's goal_hint as starting point
+    initial_goal = state.get("goal_state", subtask_data.get("goal_hint", ""))
 
-        if verifier_service:
-            try:
-                success, errors, _ = await verifier_service.verify_proof_on_copy(
-                    sorry=sorry,
-                    proof_code=tactic,
-                    attempt=state["attempt_count"],
-                    model_used=state["model_used"],
-                    temperature=state["base_temperature"],
-                )
-                if success:
-                    break
-                if errors:
-                    error = errors[0]
-            except Exception as e:
-                error = str(e)
-        else:
-            # Simulate for testing
-            success = False
-            error = "No verifier service"
+    # Build context for tactic generation
+    context = {
+        "theorem_name": sorry.theorem_name,
+        "subtask_description": subtask_data.get("description", ""),
+        "goal_hint": subtask_data.get("goal_hint", ""),
+        "suggested_tactics": subtask_data.get("suggested_tactics", []),
+    }
+
+    # Use iterative tactic loop (Phase 4.4)
+    try:
+        tactics_used, success, final_goal = await iterative_tactic_loop(
+            goal_state=initial_goal,
+            file_path=sorry.file_path,
+            line=sorry.line,
+            model=state["model_used"],
+            temperature=state["base_temperature"],
+            max_steps=state.get("max_tactic_steps", 15),
+            consecutive_failure_threshold=3,
+            context=context,
+        )
+    except Exception as e:
+        logger.warning(f"Iterative tactic loop failed: {e}")
+        error = str(e)
+
+        # Fallback: try suggested tactics directly if iterative loop fails
+        for tactic in subtask_data.get("suggested_tactics", [])[:3]:
+            tactics_used.append(tactic)
+            if verifier_service:
+                try:
+                    success, errors, _ = await verifier_service.verify_proof_on_copy(
+                        sorry=sorry,
+                        proof_code=tactic,
+                        attempt=state["attempt_count"],
+                        model_used=state["model_used"],
+                        temperature=state["base_temperature"],
+                    )
+                    if success:
+                        break
+                    if errors:
+                        error = errors[0]
+                except Exception as fallback_e:
+                    error = str(fallback_e)
 
     # Record subtask result
     subtask_record = SubTaskRecord(
@@ -1375,12 +1693,23 @@ async def subtask_executor_node(
         f"next={next_subtask}"
     )
 
+    # Build goal state history
+    goal_history = list(state.get("goal_state_history", []))
+    if final_goal:
+        goal_history.append(final_goal)
+
     return {
         "roma_subtask_records": [subtask_record],
         "roma_sub_proofs": sub_proofs,
         "roma_completed_subtasks": completed,
         "roma_current_subtask": next_subtask,
         "tried_tactics": tactics_used,
+        # Phase 4.4: Iterative refinement state updates
+        "tactic_sequence": tactics_used,  # Append via reducer
+        "goal_state_history": goal_history,
+        "goal_state": final_goal,  # Update current goal state
+        "tactic_step": state.get("tactic_step", 0) + len(tactics_used),
+        "consecutive_failures": 0 if success else state.get("consecutive_failures", 0) + 1,
     }
 
 
