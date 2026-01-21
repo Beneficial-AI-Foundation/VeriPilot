@@ -63,7 +63,7 @@ class VerifierService:
         self,
         project_dir: str,
         timeout: int = 300,
-        mcp_warmup_timeout: int = 60,
+        mcp_warmup_timeout: int = 120,
     ):
         """
         Initialize verifier service.
@@ -71,7 +71,7 @@ class VerifierService:
         Args:
             project_dir: Lean project directory (with lakefile)
             timeout: Build timeout in seconds
-            mcp_warmup_timeout: Max time to wait for MCP warm-up
+            mcp_warmup_timeout: Max time to wait for MCP warm-up (default 120s for large projects)
         """
         self.project_dir = project_dir
         self.timeout = timeout

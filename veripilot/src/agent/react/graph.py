@@ -43,6 +43,8 @@ from .nodes import (
     subtask_executor_node,
     subtask_router_node,
     aggregator_node,
+    # Phase 4.4: Iterative refinement
+    direct_iterative_node,
 )
 
 if TYPE_CHECKING:
@@ -371,26 +373,29 @@ def create_roma_graph(
     The graph implements intelligent goal decomposition:
     - Complexity analysis to assess goal difficulty
     - Atomizer decides: solve directly or decompose
-    - Planner creates subtask plan for complex goals
-    - Subtask executor runs each subtask
-    - Aggregator synthesizes sub-proofs into final proof
+    - For atomic goals: iterative tactic loop (Phase 4.4)
+    - For complex goals: planner → subtask executor → aggregator
+    - Both paths use iterative_tactic_loop() for LSP feedback
 
-    Graph topology:
-        START -> complexity_analysis -> atomizer -> roma_router
-                                                        |
-                                               (direct/decompose)
-                                                /            \\
-                                         direct_loop       planner
-                                              |                |
-                                            END          subtask_executor
-                                                               |
-                                                        subtask_router
-                                                         /    |    \\
-                                                   next   aggregate  failed
-                                                     |        |        |
-                                                     +---> aggregator  |
-                                                              |        |
-                                                            END      END
+    Graph topology (Phase 4.4 updated):
+        START -> goal_parser -> complexity_analysis -> atomizer -> roma_router
+                                                                        |
+                                                               (direct/decompose)
+                                                                /            \\
+                                                    direct_iterative       planner
+                                                    (iterative loop)          |
+                                                         |            subtask_executor
+                                                         |           (iterative loop)
+                                                         |                    |
+                                                         |             subtask_router
+                                                         |              /    |    \\
+                                                         |         next  aggregate failed
+                                                         |           |      |        |
+                                                         |           +-> aggregator  |
+                                                         |                  |        |
+                                                      success/failed      END      END
+                                                           |
+                                                          END
 
     Args:
         verifier_service: VerifierService for LSP verification.
@@ -426,20 +431,12 @@ def create_roma_graph(
     # Aggregator node
     graph.add_node("aggregator", aggregator_node)
 
-    # Direct path nodes (for atomic goals) - reuse ReAct nodes
-    graph.add_node("direct_reasoning", reasoning_node)
+    # Direct path node (Phase 4.4): Single iterative node for atomic goals
+    # Replaces the old ReAct chain (direct_reasoning → direct_execution → direct_observation)
+    async def direct_iterative_with_service(state: ProofState) -> dict:
+        return await direct_iterative_node(state, verifier_service)
 
-    async def direct_execution(state: ProofState) -> dict:
-        return await execution_node(state, verifier_service)
-
-    graph.add_node("direct_execution", direct_execution)
-
-    async def direct_observation(state: ProofState) -> dict:
-        return await observation_node(state, verifier_service)
-
-    graph.add_node("direct_observation", direct_observation)
-
-    graph.add_node("direct_increment", increment_attempt_node)
+    graph.add_node("direct_iterative", direct_iterative_with_service)
 
     # Terminal nodes
     graph.add_node("success_terminal", success_node)
@@ -459,30 +456,28 @@ def create_roma_graph(
         "atomizer",
         roma_router_node,
         {
-            "direct": "direct_reasoning",
+            "direct": "direct_iterative",  # Phase 4.4: Use iterative node
             "decompose": "planner",
             "success": "success_terminal",
             "failed": "failed_terminal",
         },
     )
 
-    # Direct path (for atomic goals): reasoning -> execution -> observation
-    graph.add_edge("direct_reasoning", "direct_execution")
-    graph.add_edge("direct_execution", "direct_observation")
+    # Direct path (Phase 4.4): Single iterative node that handles the loop internally
+    # Routes directly to success/failed based on result
+    def direct_iterative_router(state: ProofState) -> str:
+        if state["status"] == ProofStatus.SUCCESS.value:
+            return "success"
+        return "failed"
 
-    # Direct path routing after observation
     graph.add_conditional_edges(
-        "direct_observation",
-        router_node,
+        "direct_iterative",
+        direct_iterative_router,
         {
-            "continue": "direct_increment",
             "success": "success_terminal",
             "failed": "failed_terminal",
         },
     )
-
-    # Loop back from increment
-    graph.add_edge("direct_increment", "direct_reasoning")
 
     # Decomposition path: planner -> subtask_executor -> subtask_router
     graph.add_edge("planner", "subtask_executor")

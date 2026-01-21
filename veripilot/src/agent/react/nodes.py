@@ -361,6 +361,131 @@ def goal_parser_node(state: ProofState) -> dict[str, Any]:
 # ==============================================================================
 
 
+def _load_single_shot_prompt() -> str:
+    """
+    Load the single-shot tactic generation prompt.
+
+    Uses the prompt loader to get the latest version from
+    prompts/verifier/single_shot_tactics_v*.md.
+
+    Falls back to a simple inline prompt if file not found.
+    """
+    try:
+        from agent.prompt_loader import load_latest_prompt
+        return load_latest_prompt("single_shot_tactics")
+    except (ImportError, FileNotFoundError) as e:
+        logger.warning(f"Could not load single_shot_tactics prompt: {e}, using fallback")
+        # Minimal fallback - just asks for plain tactics
+        return """You are a Lean 4 proof assistant. Generate tactics to close the given proof goal.
+
+Output ONLY tactics, one per line. No explanations, no markdown, no numbering.
+
+Example output format:
+simp [add_comm]
+ring
+omega
+exact h
+rw [h_eq]
+
+Use `try grind`, `try omega`, `try ring` for safety (prevents crashes).
+Use hypothesis names explicitly (rw [h]) rather than wildcards [*]."""
+
+
+async def _single_shot_tactic_generation(
+    goal_state: str,
+    model: str,
+    temperature: float,
+    context: Optional[dict[str, Any]],
+    llm_client: Any,
+) -> tuple[list[str], bool, str]:
+    """
+    Fallback single-shot tactic generation when MCP is unavailable.
+
+    Instead of the iterative loop (which requires MCP multi_attempt), this
+    generates tactics in a single LLM call. Less effective but works without
+    MCP connection.
+
+    Returns:
+        Tuple of (tactics, success, final_goal):
+        - tactics: List of generated tactics (not verified)
+        - success: Always False (can't verify without MCP)
+        - final_goal: Original goal state (unchanged)
+    """
+    logger.info("Using single-shot tactic generation (MCP unavailable)")
+
+    prompt = _build_single_shot_prompt(goal_state, context)
+    # Use dedicated single-shot prompt (NOT ReAct format)
+    system = _load_single_shot_prompt()
+
+    logger.debug(f"Single-shot prompt (first 300 chars):\n{prompt[:300]}...")
+
+    try:
+        # LLMClient.generate() returns a string directly, not a dict
+        response = await llm_client.generate(
+            user_prompt=prompt,
+            model=model,
+            temperature=temperature,
+            system_prompt=system,
+        )
+
+        # Debug: Log raw LLM response to diagnose parsing issues
+        logger.info(f"Single-shot raw response (first 500 chars):\n{response[:500]}...")
+
+        tactics = _parse_tactic_list(response)
+
+        if tactics:
+            logger.info(f"Single-shot generated {len(tactics)} tactics: {tactics[:5]}")
+            # Note: We return success=False because we can't verify without MCP
+            # The caller should use verifier_service.verify_proof_on_copy() to verify
+            return tactics, False, goal_state
+        else:
+            logger.warning(f"Single-shot generation produced no tactics from response:\n{response[:300]}...")
+            return [], False, goal_state
+
+    except Exception as e:
+        logger.error(f"Single-shot tactic generation failed: {e}")
+        return [], False, goal_state
+
+
+def _build_single_shot_prompt(goal_state: str, context: Optional[dict[str, Any]]) -> str:
+    """Build prompt for single-shot tactic generation."""
+    parts = [
+        "Generate Lean 4 tactics to close this goal.",
+        "",
+        "## Goal State",
+        "```",
+        goal_state,
+        "```",
+    ]
+
+    if context:
+        if context.get("theorem_name"):
+            parts.extend(["", f"**Theorem:** {context['theorem_name']}"])
+        if context.get("hypothesis_names"):
+            parts.extend(["", f"**Hypotheses available:** {', '.join(context['hypothesis_names'])}"])
+        if context.get("rewrite_candidates"):
+            parts.extend(["", f"**Rewrite candidates (h : a = b):** {', '.join(context['rewrite_candidates'])}"])
+        if context.get("definitions_in_scope"):
+            parts.extend(["", f"**Definitions to unfold:** {', '.join(context['definitions_in_scope'][:5])}"])
+        if context.get("rag_tactics"):
+            parts.extend(["", "**Similar proofs from codebase:**"])
+            for tactic in context["rag_tactics"][:3]:
+                parts.append(f"  - {tactic[:100]}...")
+
+    parts.extend([
+        "",
+        "## Instructions",
+        "Output one or more tactics, one per line.",
+        "Start with simpler tactics (simp, rfl, ring) before complex ones.",
+        "Use hypothesis names explicitly (rw [h]) rather than wildcards [*].",
+        "Chain with semicolons only if necessary.",
+        "",
+        "## Output (tactics only, no explanation)",
+    ])
+
+    return "\n".join(parts)
+
+
 async def iterative_tactic_loop(
     goal_state: str,
     file_path: str,
@@ -370,6 +495,7 @@ async def iterative_tactic_loop(
     max_steps: int = 15,
     consecutive_failure_threshold: int = 3,
     context: Optional[dict[str, Any]] = None,
+    mcp_client: Optional[Any] = None,  # Connected MCP client (from VerifierService)
 ) -> tuple[list[str], bool, str]:
     """
     Iteratively apply tactics using MCP multi_attempt for non-destructive testing.
@@ -388,6 +514,8 @@ async def iterative_tactic_loop(
         max_steps: Maximum number of tactics to try (default 15)
         consecutive_failure_threshold: Re-analyze after N consecutive failures
         context: Optional additional context (theorem_name, hypotheses, etc.)
+        mcp_client: Optional connected MCP client from VerifierService.
+                   If None, falls back to single-shot tactic generation.
 
     Returns:
         Tuple of (tactics_applied, success, final_goal_state):
@@ -399,15 +527,27 @@ async def iterative_tactic_loop(
         Uses "adaptive re-analysis" - lightweight checks after each tactic
         (did goal change? any goals left?), escalates to full re-analysis
         (re-parse goal, reconsider strategy) after consecutive failures.
+
+        If MCP is unavailable, falls back to single-shot generation (generates
+        all tactics in one LLM call without interactive testing).
     """
     from agent.llm_client import LLMClient
-    from verifier.mcp_client import get_mcp_client
 
     tactics_applied: list[str] = []
     current_goal = goal_state
     consecutive_failures = 0
     llm_client = LLMClient()
-    mcp_client = get_mcp_client()
+
+    # Check if MCP is available for iterative testing
+    if mcp_client is None:
+        logger.warning("MCP client not available - falling back to single-shot generation")
+        return await _single_shot_tactic_generation(
+            goal_state=goal_state,
+            model=model,
+            temperature=temperature,
+            context=context,
+            llm_client=llm_client,
+        )
 
     logger.info(f"Starting iterative tactic loop: max_steps={max_steps}")
 
@@ -630,23 +770,61 @@ async def _generate_tactic_candidates(
 
 
 def _parse_tactic_list(response: str) -> list[str]:
-    """Parse list of tactics from LLM response."""
+    """Parse list of tactics from LLM response.
+
+    Handles multiple formats:
+    - Bulleted lists (-, *)
+    - Numbered lists (1., 2.)
+    - Code blocks (```lean ... ```)
+    - Plain lines that look like Lean tactics
+    """
     tactics = []
+
+    # Extract code blocks first
+    import re
+    code_block_pattern = r"```(?:lean)?\s*\n(.*?)```"
+    code_blocks = re.findall(code_block_pattern, response, re.DOTALL)
+    for block in code_blocks:
+        for line in block.split("\n"):
+            line = line.strip()
+            if line and not line.startswith("--"):  # Skip comments
+                tactics.append(line)
+
+    # If we found tactics in code blocks, return them
+    if tactics:
+        return tactics
+
+    # Otherwise, try other formats
     for line in response.split("\n"):
         line = line.strip()
+        # Skip empty lines and markdown headers
+        if not line or line.startswith("#"):
+            continue
+
         # Look for lines starting with - or *
         if line.startswith("-") or line.startswith("*"):
             tactic = line[1:].strip()
-            # Remove backticks if present
             tactic = tactic.strip("`")
-            if tactic:
+            if tactic and not tactic.startswith("This") and not tactic.startswith("The"):
                 tactics.append(tactic)
-        # Also accept numbered lists
+        # Accept numbered lists
         elif line and line[0].isdigit() and "." in line[:3]:
             tactic = line.split(".", 1)[1].strip()
             tactic = tactic.strip("`")
+            if tactic and not tactic.startswith("This") and not tactic.startswith("The"):
+                tactics.append(tactic)
+        # Accept inline code that looks like a tactic
+        elif line.startswith("`") and line.endswith("`"):
+            tactic = line.strip("`")
             if tactic:
                 tactics.append(tactic)
+        # Accept lines that look like Lean tactics (start with common tactic keywords)
+        elif any(line.startswith(kw) for kw in [
+            "simp", "rfl", "ring", "omega", "exact", "apply", "intro", "constructor",
+            "rw", "have", "let", "unfold", "decide", "norm_num", "try", "sorry"
+        ]):
+            tactics.append(line)
+
     return tactics
 
 
@@ -1616,6 +1794,12 @@ async def subtask_executor_node(
         "suggested_tactics": subtask_data.get("suggested_tactics", []),
     }
 
+    # Extract MCP client from verifier_service if available
+    mcp_client = None
+    if verifier_service and verifier_service._status.mcp_available:
+        mcp_client = verifier_service._mcp_client
+        logger.debug("Using connected MCP client from VerifierService for subtask")
+
     # Use iterative tactic loop (Phase 4.4)
     try:
         tactics_used, success, final_goal = await iterative_tactic_loop(
@@ -1627,6 +1811,7 @@ async def subtask_executor_node(
             max_steps=state.get("max_tactic_steps", 15),
             consecutive_failure_threshold=3,
             context=context,
+            mcp_client=mcp_client,
         )
     except Exception as e:
         logger.warning(f"Iterative tactic loop failed: {e}")
@@ -1828,4 +2013,153 @@ async def aggregator_node(state: ProofState) -> dict[str, Any]:
         # Failed synthesis
         return {
             "status": ProofStatus.FAILED.value,
+        }
+
+
+# ==============================================================================
+# Direct Iterative Node (Phase 4.4)
+# ==============================================================================
+
+
+async def direct_iterative_node(
+    state: ProofState,
+    verifier_service: Optional["VerifierService"] = None,
+) -> dict[str, Any]:
+    """
+    Direct path node for atomic goals using iterative tactic loop.
+
+    Phase 4.4: Replaces the ReAct chain (direct_reasoning → direct_execution
+    → direct_observation) for atomic goals in ROMA. Instead of generating
+    all tactics in one shot, this node iteratively applies tactics using
+    MCP multi_attempt for non-destructive testing.
+
+    This node:
+    1. Gets the current goal state
+    2. Builds context from goal analysis
+    3. Runs iterative_tactic_loop() to find working tactics
+    4. Returns success/failure with applied tactics
+
+    Args:
+        state: Current ProofState
+        verifier_service: VerifierService for LSP verification (optional,
+                         used as fallback if iterative loop fails)
+
+    Returns:
+        Partial state update with:
+        - status: ProofStatus.SUCCESS or ProofStatus.FAILED
+        - current_proof: The successful proof if found
+        - tactic_sequence: Tactics that succeeded
+        - goal_state: Final goal state after tactics
+        - Other iterative refinement state fields
+    """
+    sorry = dict_to_sorry(state["sorry_location"])
+    initial_goal = state.get("goal_state", "")
+    model = state.get("model_used", "gemini-3-pro-preview")
+    temperature = state.get("base_temperature", 0.2)
+    max_steps = state.get("max_tactic_steps", 15)
+
+    logger.info(
+        f"Direct iterative node: {sorry.theorem_name} at line {sorry.line}"
+    )
+
+    # Build context from goal analysis and state
+    context = {
+        "theorem_name": sorry.theorem_name,
+        "file_path": sorry.file_path,
+    }
+
+    # Add goal analysis if available (from goal_parser_node)
+    goal_analysis = state.get("goal_analysis")
+    if goal_analysis:
+        context["goal_type"] = goal_analysis.get("goal_type", "")
+        context["hypothesis_names"] = [
+            h.get("name") for h in goal_analysis.get("hypotheses", [])
+        ]
+        context["rewrite_candidates"] = goal_analysis.get("rewrite_candidates", [])
+        context["definitions_in_scope"] = goal_analysis.get("definitions_in_scope", [])
+
+    # Add RAG results if available
+    rag_results = state.get("rag_results", [])
+    if rag_results:
+        context["rag_tactics"] = [r.get("content", "") for r in rag_results[:3]]
+
+    # Extract MCP client from verifier_service if available
+    mcp_client = None
+    if verifier_service and verifier_service._status.mcp_available:
+        mcp_client = verifier_service._mcp_client
+        logger.debug("Using connected MCP client from VerifierService")
+
+    # Run iterative tactic loop
+    tactics_applied: list[str] = []
+    success = False
+    final_goal = initial_goal
+
+    try:
+        tactics_applied, success, final_goal = await iterative_tactic_loop(
+            goal_state=initial_goal,
+            file_path=sorry.file_path,
+            line=sorry.line,
+            model=model,
+            temperature=temperature,
+            max_steps=max_steps,
+            consecutive_failure_threshold=3,
+            context=context,
+            mcp_client=mcp_client,
+        )
+    except Exception as e:
+        logger.warning(f"Iterative tactic loop failed: {e}")
+
+        # Fallback: try simple verification if verifier_service available
+        if verifier_service and state.get("current_proof"):
+            try:
+                fallback_success, errors, _ = await verifier_service.verify_proof_on_copy(
+                    sorry=sorry,
+                    proof_code=state["current_proof"],
+                    attempt=state.get("attempt_count", 1),
+                    model_used=model,
+                    temperature=temperature,
+                )
+                if fallback_success:
+                    tactics_applied = [state["current_proof"]]
+                    success = True
+                    final_goal = "no goals"
+            except Exception as fallback_e:
+                logger.warning(f"Fallback verification also failed: {fallback_e}")
+
+    # Build combined proof from tactics
+    combined_proof = "; ".join(tactics_applied) if tactics_applied else state.get("current_proof", "")
+
+    # Update goal state history
+    goal_history = list(state.get("goal_state_history", []))
+    if final_goal:
+        goal_history.append(final_goal)
+
+    logger.info(
+        f"Direct iterative node result: {'SUCCESS' if success else 'FAILED'}, "
+        f"tactics={len(tactics_applied)}"
+    )
+
+    # Return state updates
+    if success:
+        return {
+            "status": ProofStatus.SUCCESS.value,
+            "current_proof": combined_proof,
+            "tried_tactics": tactics_applied,
+            # Phase 4.4: Iterative refinement state updates
+            "tactic_sequence": tactics_applied,
+            "goal_state_history": goal_history,
+            "goal_state": final_goal,
+            "tactic_step": state.get("tactic_step", 0) + len(tactics_applied),
+            "consecutive_failures": 0,
+        }
+    else:
+        return {
+            "status": ProofStatus.FAILED.value,
+            "tried_tactics": tactics_applied,
+            # Phase 4.4: Iterative refinement state updates
+            "tactic_sequence": tactics_applied,
+            "goal_state_history": goal_history,
+            "goal_state": final_goal,
+            "tactic_step": state.get("tactic_step", 0) + len(tactics_applied),
+            "consecutive_failures": state.get("consecutive_failures", 0) + 1,
         }
