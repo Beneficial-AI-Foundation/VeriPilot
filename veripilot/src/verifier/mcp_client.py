@@ -6,16 +6,95 @@ instant diagnostics without running lake build.
 """
 
 import asyncio
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from enum import Enum
+from time import time
 from typing import Any, Optional
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from mcp.shared.exceptions import McpError
 
 logger = logging.getLogger(__name__)
+
+# MCP error code for file worker termination
+MCP_WORKER_TERMINATED = -32801
+
+
+class MCPWorkerCrashError(Exception):
+    """Raised when MCP file worker terminates (error -32801)."""
+    pass
+
+
+class MCPUnavailableError(Exception):
+    """Raised when MCP client is unavailable (circuit tripped or restart failed)."""
+    pass
+
+
+class CircuitState(Enum):
+    CLOSED = "closed"
+    OPEN = "open"
+    HALF_OPEN = "half_open"
+
+
+class FailureTracker:
+    """Per-file circuit breaker with half-open recovery.
+
+    States:
+    - CLOSED: Normal operation, calls allowed
+    - OPEN: Too many failures, calls blocked until cooldown expires
+    - HALF_OPEN: Cooldown expired, one probe call allowed to test recovery
+    """
+
+    def __init__(self, threshold: int = 3, cooldown_seconds: float = 30.0):
+        self.threshold = threshold
+        self.cooldown_seconds = cooldown_seconds
+        self.failure_count = 0
+        self.state = CircuitState.CLOSED
+        self.last_failure_time = 0.0
+        self.trip_time = 0.0
+
+    def record_failure(self) -> None:
+        """Record a failed call. Opens circuit after threshold failures."""
+        self.failure_count += 1
+        self.last_failure_time = time()
+        if self.failure_count >= self.threshold:
+            if self.state != CircuitState.OPEN:
+                logger.warning(f"Circuit breaker OPEN after {self.failure_count} failures")
+                self.state = CircuitState.OPEN
+                self.trip_time = time()
+
+    def record_success(self) -> None:
+        """Record a successful call. Closes circuit if in half-open state."""
+        if self.state == CircuitState.HALF_OPEN:
+            logger.info("Circuit breaker CLOSED after successful recovery")
+            self.state = CircuitState.CLOSED
+            self.failure_count = 0
+        elif self.state == CircuitState.CLOSED:
+            self.failure_count = max(0, self.failure_count - 1)
+
+    def should_allow_call(self) -> bool:
+        """Check whether a call should be allowed through the circuit."""
+        if self.state == CircuitState.CLOSED:
+            return True
+        if self.state == CircuitState.HALF_OPEN:
+            return True
+        # OPEN state: check if cooldown expired
+        if time() - self.trip_time >= self.cooldown_seconds:
+            logger.info(
+                f"Circuit breaker entering HALF_OPEN after {self.cooldown_seconds}s cooldown"
+            )
+            self.state = CircuitState.HALF_OPEN
+            return True
+        return False
+
+    def is_tripped(self) -> bool:
+        """Check if circuit is currently tripped (OPEN or HALF_OPEN)."""
+        return self.state in (CircuitState.OPEN, CircuitState.HALF_OPEN)
 
 
 @dataclass
@@ -94,6 +173,19 @@ class LeanMCPClient:
         self._session: Optional[ClientSession] = None
         self._connected = False
 
+        # Call serialization
+        self._call_lock = asyncio.Lock()
+        self._is_restarting = False
+
+        # Restart tracking
+        self._restart_count = 0
+        self._max_restarts = 3
+        self._backoff_seconds = 1.5
+        self._successful_calls = 0
+
+        # Per-file circuit breakers
+        self._file_trackers: dict[str, FailureTracker] = {}
+
     @asynccontextmanager
     async def connect(self):
         """
@@ -121,9 +213,56 @@ class LeanMCPClient:
                     self._connected = False
                     self._session = None
 
+    async def _restart_connection(self, warmup_timeout: float = 120.0) -> bool:
+        """
+        Restart MCP connection after crash. Returns True if successful.
+
+        Prepares client state for reconnection. The actual reconnection
+        happens when the caller re-enters the connect() context.
+        """
+        self._restart_count += 1
+        if self._restart_count > self._max_restarts:
+            logger.error(f"Restart limit reached ({self._max_restarts})")
+            return False
+
+        self._is_restarting = True
+        try:
+            if self._session:
+                try:
+                    self._connected = False
+                    self._session = None
+                except Exception:
+                    pass
+
+            backoff = self._backoff_seconds * self._restart_count
+            logger.info(f"Restarting MCP after {backoff}s backoff (attempt {self._restart_count})")
+            await asyncio.sleep(backoff)
+
+            logger.info(f"MCP connection ready for restart (attempt {self._restart_count})")
+            return True
+        finally:
+            self._is_restarting = False
+
+    def _record_successful_call(self) -> None:
+        """Record a successful call. Resets restart counter after 10 consecutive successes."""
+        self._successful_calls += 1
+        if self._successful_calls >= 10:
+            self._restart_count = 0
+            self._successful_calls = 0
+            logger.debug("Restart counter reset after stable operation")
+
+    def _get_tracker(self, file_path: str) -> FailureTracker:
+        """Get or create a per-file circuit breaker tracker."""
+        if file_path not in self._file_trackers:
+            self._file_trackers[file_path] = FailureTracker(threshold=3, cooldown_seconds=30.0)
+        return self._file_trackers[file_path]
+
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
         """
         Call an MCP tool and return the result.
+
+        Serialized via asyncio.Lock to prevent concurrent call collisions.
+        Detects -32801 file worker crashes and raises MCPWorkerCrashError.
 
         Args:
             name: Tool name (e.g., "lean_diagnostic_messages")
@@ -134,23 +273,41 @@ class LeanMCPClient:
 
         Raises:
             RuntimeError: If not connected
+            MCPWorkerCrashError: If MCP file worker terminated (-32801)
         """
         if not self._connected or not self._session:
             raise RuntimeError("Not connected to MCP server. Use 'async with client.connect():'")
 
-        result = await self._session.call_tool(name, arguments)
+        while self._is_restarting:
+            await asyncio.sleep(0.1)
 
-        # Parse result content
-        if result.content:
-            for item in result.content:
-                if hasattr(item, "text"):
-                    import json
+        async with self._call_lock:
+            try:
+                result = await self._session.call_tool(name, arguments)
+            except McpError as e:
+                if (
+                    hasattr(e, "error")
+                    and hasattr(e.error, "code")
+                    and e.error.code == MCP_WORKER_TERMINATED
+                ):
+                    self._successful_calls = 0
+                    raise MCPWorkerCrashError(
+                        f"MCP file worker crashed (error {MCP_WORKER_TERMINATED}): {e}"
+                    )
+                raise
 
-                    try:
-                        return json.loads(item.text)
-                    except json.JSONDecodeError:
-                        return item.text
-        return None
+            if result.content:
+                for item in result.content:
+                    if hasattr(item, "text"):
+                        try:
+                            parsed = json.loads(item.text)
+                            self._record_successful_call()
+                            return parsed
+                        except json.JSONDecodeError:
+                            self._record_successful_call()
+                            return item.text
+            self._record_successful_call()
+            return None
 
     async def get_diagnostics(
         self,
@@ -161,6 +318,8 @@ class LeanMCPClient:
         """
         Get compiler diagnostics for a Lean file.
 
+        Checks per-file circuit breaker before calling.
+
         Args:
             file_path: Absolute path to the Lean file
             start_line: Optional start line filter
@@ -168,23 +327,36 @@ class LeanMCPClient:
 
         Returns:
             List of diagnostic items
+
+        Raises:
+            MCPUnavailableError: If circuit breaker is tripped for this file
         """
+        tracker = self._get_tracker(file_path)
+        if not tracker.should_allow_call():
+            raise MCPUnavailableError(f"Circuit tripped for {file_path}")
+
         args: dict[str, Any] = {"file_path": file_path}
         if start_line is not None:
             args["start_line"] = start_line
         if end_line is not None:
             args["end_line"] = end_line
 
-        result = await self.call_tool("lean_diagnostic_messages", args)
+        try:
+            result = await self.call_tool("lean_diagnostic_messages", args)
+        except (MCPWorkerCrashError, Exception) as e:
+            tracker.record_failure()
+            raise
 
         if not result:
+            tracker.record_success()
             return []
 
-        # Handle case where result is a string (MCP returned non-JSON)
         if isinstance(result, str):
             logger.warning(f"MCP returned string instead of dict for diagnostics: {result[:200]}")
+            tracker.record_success()
             return []
 
+        tracker.record_success()
         items = result.get("items", [])
         return [DiagnosticItem.from_dict(item) for item in items]
 
@@ -197,6 +369,8 @@ class LeanMCPClient:
         """
         Get proof goal state at a position.
 
+        Checks per-file circuit breaker before calling.
+
         Args:
             file_path: Absolute path to the Lean file
             line: Line number (1-indexed)
@@ -204,21 +378,34 @@ class LeanMCPClient:
 
         Returns:
             GoalState or None if not in a proof context
+
+        Raises:
+            MCPUnavailableError: If circuit breaker is tripped for this file
         """
+        tracker = self._get_tracker(file_path)
+        if not tracker.should_allow_call():
+            raise MCPUnavailableError(f"Circuit tripped for {file_path}")
+
         args: dict[str, Any] = {"file_path": file_path, "line": line}
         if column is not None:
             args["column"] = column
 
-        result = await self.call_tool("lean_goal", args)
+        try:
+            result = await self.call_tool("lean_goal", args)
+        except (MCPWorkerCrashError, Exception) as e:
+            tracker.record_failure()
+            raise
 
         if not result:
+            tracker.record_success()
             return None
 
-        # Handle case where result is a string (MCP returned non-JSON)
         if isinstance(result, str):
             logger.warning(f"MCP returned string instead of dict for goal: {result[:200]}")
+            tracker.record_success()
             return None
 
+        tracker.record_success()
         return GoalState(
             goals_before=result.get("goals_before"),
             goals_after=result.get("goals_after"),
@@ -232,7 +419,10 @@ class LeanMCPClient:
         snippets: list[str],
     ) -> list[dict[str, Any]]:
         """
-        Try multiple tactics at a position without modifying the file.
+        [DEPRECATED] Try multiple tactics at a position.
+
+        WARNING: multi_attempt hangs after 1-2 calls and crashes the LSP.
+        Use edit_file + lean_goal loop instead (Plan 03).
 
         Args:
             file_path: Absolute path to the Lean file
@@ -241,15 +431,30 @@ class LeanMCPClient:
 
         Returns:
             List of results for each tactic
+
+        Raises:
+            MCPUnavailableError: If circuit breaker is tripped for this file
         """
-        result = await self.call_tool(
-            "lean_multi_attempt",
-            {"file_path": file_path, "line": line, "snippets": snippets},
-        )
+        logger.warning("multi_attempt is deprecated. Use edit_file + lean_goal instead.")
+
+        tracker = self._get_tracker(file_path)
+        if not tracker.should_allow_call():
+            raise MCPUnavailableError(f"Circuit tripped for {file_path}")
+
+        try:
+            result = await self.call_tool(
+                "lean_multi_attempt",
+                {"file_path": file_path, "line": line, "snippets": snippets},
+            )
+        except (MCPWorkerCrashError, Exception) as e:
+            tracker.record_failure()
+            raise
 
         if not result:
+            tracker.record_success()
             return []
 
+        tracker.record_success()
         return result if isinstance(result, list) else []
 
 
