@@ -525,12 +525,13 @@ async def iterative_tactic_loop(
     mcp_client: Optional[Any] = None,  # Connected MCP client (from VerifierService)
 ) -> tuple[list[str], bool, str]:
     """
-    Iteratively apply tactics using MCP multi_attempt for non-destructive testing.
+    Iteratively apply tactics using MCP edit_file for safe edit-check-revert testing.
 
     This is the core iterative refinement loop that addresses the "single-shot"
     architecture limitation. Instead of generating all tactics in one shot,
-    it generates one tactic at a time, tests it, and re-evaluates based on
-    the actual goal state change.
+    it generates candidates, tests each via edit_file (which handles backup,
+    edit, check, and revert internally), and re-evaluates based on the actual
+    goal state change.
 
     Args:
         goal_state: Current goal state from LSP
@@ -541,7 +542,7 @@ async def iterative_tactic_loop(
         max_steps: Maximum number of tactics to try (default 15)
         consecutive_failure_threshold: Re-analyze after N consecutive failures
         context: Optional additional context (theorem_name, hypotheses, etc.)
-        mcp_client: Optional connected MCP client from VerifierService.
+        mcp_client: Optional connected MCP client (LeanMCPClient).
                    If None, falls back to single-shot tactic generation.
 
     Returns:
@@ -605,37 +606,36 @@ async def iterative_tactic_loop(
             consecutive_failures += 1
             continue
 
-        # Try candidates using multi_attempt (non-destructive)
-        try:
-            results = await mcp_client.multi_attempt(
-                file_path=file_path,
-                line=line,
-                snippets=candidates,
-            )
-        except Exception as e:
-            logger.warning(f"multi_attempt failed: {e}")
-            consecutive_failures += 1
-            continue
+        # Try candidates using edit_file (safe edit-check-revert loop)
+        from verifier.mcp_client import MCPWorkerCrashError
 
-        # Evaluate results - find first successful tactic
         success_found = False
-        for i, result in enumerate(results):
-            tactic = candidates[i] if i < len(candidates) else "unknown"
+        for candidate in candidates:
+            try:
+                made_progress, new_goal_str, error_msg = await mcp_client.edit_file(
+                    file_path=file_path,
+                    line=line,
+                    tactic=candidate,
+                )
+            except MCPWorkerCrashError:
+                raise  # Let caller handle crash recovery
+            except Exception as e:
+                logger.warning(f"edit_file failed for '{candidate[:50]}': {e}")
+                continue
 
-            # Check if this tactic made progress
-            new_goal = _extract_goal_from_result(result)
-            if new_goal and _made_progress(current_goal, new_goal):
-                tactics_applied.append(tactic)
-                current_goal = new_goal
+            if made_progress and new_goal_str:
+                tactics_applied.append(candidate)
+                current_goal = new_goal_str
                 consecutive_failures = 0
                 success_found = True
-                logger.info(f"Step {step}: '{tactic[:50]}...' succeeded")
+                logger.info(f"Step {step}: '{candidate[:50]}...' succeeded")
 
-                # Check if goal is now closed
-                if _is_goal_closed(new_goal):
-                    logger.info(f"Goal closed by tactic: {tactic[:50]}...")
+                if _is_goal_closed(new_goal_str):
+                    logger.info(f"Goal closed by tactic: {candidate[:50]}...")
                     return tactics_applied, True, current_goal
                 break
+            elif error_msg:
+                logger.debug(f"Step {step}: '{candidate[:50]}' — {error_msg}")
 
         if not success_found:
             consecutive_failures += 1
@@ -2062,16 +2062,11 @@ async def direct_iterative_node(
     """
     Direct path node for atomic goals using iterative tactic loop.
 
-    Phase 4.4: Replaces the ReAct chain (direct_reasoning → direct_execution
-    → direct_observation) for atomic goals in ROMA. Instead of generating
-    all tactics in one shot, this node iteratively applies tactics using
-    MCP multi_attempt for non-destructive testing.
+    Replaces the ReAct chain for atomic goals in ROMA. Iteratively applies
+    tactics using edit_file for safe edit-check-revert testing.
 
-    This node:
-    1. Gets the current goal state
-    2. Builds context from goal analysis
-    3. Runs iterative_tactic_loop() to find working tactics
-    4. Returns success/failure with applied tactics
+    Includes crash recovery: retries up to 3 times on MCPWorkerCrashError
+    with exponential backoff, falls back to single-shot on MCPUnavailableError.
 
     Args:
         state: Current ProofState
@@ -2084,7 +2079,6 @@ async def direct_iterative_node(
         - current_proof: The successful proof if found
         - tactic_sequence: Tactics that succeeded
         - goal_state: Final goal state after tactics
-        - Other iterative refinement state fields
     """
     sorry = dict_to_sorry(state["sorry_location"])
     initial_goal = state.get("goal_state", "")
@@ -2123,27 +2117,44 @@ async def direct_iterative_node(
         mcp_client = verifier_service._mcp_client
         logger.debug("Using connected MCP client from VerifierService")
 
-    # Run iterative tactic loop
+    # Run iterative tactic loop with crash recovery
+    import asyncio
+    from verifier.mcp_client import MCPWorkerCrashError, MCPUnavailableError
+
     tactics_applied: list[str] = []
     success = False
     final_goal = initial_goal
 
-    try:
-        tactics_applied, success, final_goal = await iterative_tactic_loop(
-            goal_state=initial_goal,
-            file_path=sorry.file_path,
-            line=sorry.line,
-            model=model,
-            temperature=temperature,
-            max_steps=max_steps,
-            consecutive_failure_threshold=3,
-            context=context,
-            mcp_client=mcp_client,
-        )
-    except Exception as e:
-        logger.warning(f"Iterative tactic loop failed: {e}")
+    max_retries = 3
+    for retry in range(max_retries):
+        try:
+            tactics_applied, success, final_goal = await iterative_tactic_loop(
+                goal_state=initial_goal,
+                file_path=sorry.file_path,
+                line=sorry.line,
+                model=model,
+                temperature=temperature,
+                max_steps=max_steps,
+                consecutive_failure_threshold=3,
+                context=context,
+                mcp_client=mcp_client,
+            )
+            break  # Normal completion (success or failure), exit retry loop
+        except MCPWorkerCrashError as e:
+            logger.error(f"MCP crashed (retry {retry+1}/{max_retries}): {e}")
+            mcp_client = None  # Force single-shot fallback on next retry
+            if retry < max_retries - 1:
+                await asyncio.sleep(2 ** (retry + 1))
+        except MCPUnavailableError as e:
+            logger.error(f"MCP unavailable: {e}")
+            mcp_client = None
+            break  # Don't retry if circuit breaker tripped
+        except Exception as e:
+            logger.warning(f"Iterative tactic loop failed: {e}")
+            break
 
-        # Fallback: try simple verification if verifier_service available
+    # Fallback: try simple verification if loop produced no result
+    if not tactics_applied and not success:
         if verifier_service and state.get("current_proof"):
             try:
                 fallback_success, errors, _ = await verifier_service.verify_proof_on_copy(
