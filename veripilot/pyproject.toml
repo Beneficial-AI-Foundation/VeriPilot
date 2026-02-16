@@ -37,6 +37,9 @@ dependencies = [
     "typer>=0.12.0",                # CLI framework
     "click>=8.0.0",                 # Typer dependency
 
+    # MCP (Lean LSP integration)
+    "mcp>=1.0.0",
+
     # Utilities
     "pyyaml>=6.0",
     "pydantic>=2.0",
