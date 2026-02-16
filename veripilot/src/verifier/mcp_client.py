@@ -12,6 +12,7 @@ import os
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 from time import time
 from typing import Any, Optional
 
@@ -23,6 +24,11 @@ logger = logging.getLogger(__name__)
 
 # MCP error code for file worker termination
 MCP_WORKER_TERMINATED = -32801
+
+# Tool timeout configuration (seconds)
+SAFE_TOOLS = {"lean_goal", "lean_term_goal", "lean_hover_info", "lean_local_search", "lean_diagnostic_messages"}
+SAFE_TIMEOUT = 10.0
+DANGEROUS_TIMEOUT = 30.0
 
 
 class MCPWorkerCrashError(Exception):
@@ -138,6 +144,24 @@ class GoalState:
         return after == "" or after == "no goals" or "no goals" in after
 
 
+def join_goals(goals: Optional[list | str]) -> Optional[str]:
+    """
+    Convert goal list to string.
+
+    MCP lean_goal returns goals_before/goals_after as arrays.
+    Join them into a single string for consistent handling.
+    """
+    if goals is None:
+        return None
+    if isinstance(goals, str):
+        return goals
+    if isinstance(goals, list):
+        if not goals:
+            return ""
+        return "\n\n".join(str(g) for g in goals)
+    return str(goals)
+
+
 class LeanMCPClient:
     """
     Client for the lean-lsp MCP server.
@@ -185,6 +209,12 @@ class LeanMCPClient:
 
         # Per-file circuit breakers
         self._file_trackers: dict[str, FailureTracker] = {}
+
+        # File backups for safe edit/revert
+        self._file_backups: dict[str, str] = {}
+
+        # File warmup tracking
+        self._warmed_files: set[str] = set()
 
     @asynccontextmanager
     async def connect(self):
@@ -257,6 +287,32 @@ class LeanMCPClient:
             self._file_trackers[file_path] = FailureTracker(threshold=3, cooldown_seconds=30.0)
         return self._file_trackers[file_path]
 
+    async def warmup_file(self, file_path: str, timeout: float = 30.0) -> bool:
+        """
+        Warm up a file by requesting diagnostics.
+
+        Ensures the LSP has fully processed the file before querying
+        goals or running tactics. Prevents cold-start issues.
+
+        Returns True if warmup succeeded.
+        """
+        if file_path in self._warmed_files:
+            logger.debug(f"File already warmed: {file_path}")
+            return True
+
+        logger.info(f"Warming up file: {file_path}")
+        try:
+            await asyncio.wait_for(self.get_diagnostics(file_path), timeout=timeout)
+            self._warmed_files.add(file_path)
+            logger.info(f"File warmup complete: {file_path}")
+            return True
+        except asyncio.TimeoutError:
+            logger.warning(f"File warmup timed out after {timeout}s: {file_path}")
+            return False
+        except Exception as e:
+            logger.warning(f"File warmup failed for {file_path}: {e}")
+            return False
+
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
         """
         Call an MCP tool and return the result.
@@ -282,8 +338,17 @@ class LeanMCPClient:
             await asyncio.sleep(0.1)
 
         async with self._call_lock:
+            # Apply per-tool timeout
+            timeout = SAFE_TIMEOUT if name in SAFE_TOOLS else DANGEROUS_TIMEOUT
             try:
-                result = await self._session.call_tool(name, arguments)
+                result = await asyncio.wait_for(
+                    self._session.call_tool(name, arguments),
+                    timeout=timeout,
+                )
+            except asyncio.TimeoutError:
+                logger.error(f"Tool '{name}' timed out after {timeout}s")
+                self._successful_calls = 0
+                raise MCPWorkerCrashError(f"Tool '{name}' timed out after {timeout}s")
             except McpError as e:
                 if (
                     hasattr(e, "error")
@@ -407,10 +472,115 @@ class LeanMCPClient:
 
         tracker.record_success()
         return GoalState(
-            goals_before=result.get("goals_before"),
-            goals_after=result.get("goals_after"),
+            goals_before=join_goals(result.get("goals_before")),
+            goals_after=join_goals(result.get("goals_after")),
             line_context=result.get("line_context"),
         )
+
+    async def edit_file(
+        self,
+        file_path: str,
+        line: int,
+        tactic: str,
+        column: Optional[int] = None,
+    ) -> tuple[bool, Optional[str], Optional[str]]:
+        """
+        Edit a Lean file with a tactic and check if it makes progress.
+
+        Implements Lean_MCP_pt2.md Section 4.1: safe edit-check-revert loop.
+
+        Workflow:
+        1. Backup file content
+        2. Get baseline goal state
+        3. Replace sorry at target line with tactic
+        4. Wait for Lean to reprocess
+        5. Check new goal state
+        6. Revert if no progress or error
+
+        Returns:
+            (success, new_goal_state, error_msg)
+        """
+        path = Path(file_path)
+        if not path.exists():
+            return (False, None, f"File not found: {file_path}")
+
+        # 1. Backup file
+        original_content = path.read_text()
+        self._file_backups[file_path] = original_content
+
+        try:
+            # 2. Get baseline goal state
+            baseline_goal = await self.get_goal(file_path, line, column)
+            if baseline_goal is None:
+                return (False, None, "No proof context at target position")
+
+            # 3. Replace sorry with tactic (preserving indent)
+            lines = original_content.splitlines(keepends=True)
+            if line < 1 or line > len(lines):
+                return (False, None, f"Line {line} out of range (file has {len(lines)} lines)")
+
+            target_line = lines[line - 1]
+            if "sorry" not in target_line.lower():
+                return (False, None, f"No 'sorry' found on line {line}")
+
+            new_line = target_line.replace("sorry", tactic, 1)
+            lines[line - 1] = new_line
+            path.write_text("".join(lines))
+            logger.debug(f"Edited {file_path}:{line} — replaced sorry with: {tactic}")
+
+            # 4. Wait for Lean to reprocess
+            await asyncio.sleep(0.5)
+
+            # 5. Check new goal state
+            new_goal = await self.get_goal(file_path, line, column)
+
+            # Check for errors at the edited line
+            diagnostics = await self.get_diagnostics(file_path, start_line=line, end_line=line)
+            errors = [d for d in diagnostics if d.severity == "error"]
+
+            if errors:
+                error_msg = "; ".join(e.message for e in errors[:3])
+                logger.debug(f"Tactic caused errors: {error_msg}")
+                await self.revert_file(file_path)
+                return (False, None, f"Tactic caused errors: {error_msg}")
+
+            if new_goal is None:
+                await self.revert_file(file_path)
+                return (False, None, "Lost proof context after tactic")
+
+            if new_goal.is_complete:
+                logger.info(f"Tactic completed proof at {file_path}:{line}")
+                return (True, "no goals", None)
+
+            # Check if goals changed
+            if new_goal.goals_after != baseline_goal.goals_after:
+                logger.info(f"Tactic made progress at {file_path}:{line}")
+                return (True, new_goal.goals_after, None)
+
+            # No progress
+            logger.debug(f"Tactic made no progress at {file_path}:{line}")
+            await self.revert_file(file_path)
+            return (False, None, "Tactic made no progress")
+
+        except Exception as e:
+            logger.error(f"Error during edit_file: {e}")
+            await self.revert_file(file_path)
+            return (False, None, f"Exception during edit: {e}")
+
+    async def revert_file(self, file_path: str) -> bool:
+        """Revert a file to its backed-up content."""
+        if file_path not in self._file_backups:
+            logger.warning(f"No backup found for {file_path}")
+            return False
+
+        try:
+            Path(file_path).write_text(self._file_backups[file_path])
+            logger.debug(f"Reverted {file_path} to backup")
+            await asyncio.sleep(0.5)  # Let Lean reprocess
+            return True
+        except Exception as e:
+            logger.error(f"Failed to revert {file_path}: {e}")
+            return False
 
     async def multi_attempt(
         self,
@@ -436,6 +606,10 @@ class LeanMCPClient:
             MCPUnavailableError: If circuit breaker is tripped for this file
         """
         logger.warning("multi_attempt is deprecated. Use edit_file + lean_goal instead.")
+        logger.info(f"multi_attempt at {file_path}:{line} with {len(snippets)} snippets")
+        for i, snippet in enumerate(snippets, 1):
+            preview = snippet[:100] + "..." if len(snippet) > 100 else snippet
+            logger.debug(f"  Snippet {i}: {preview}")
 
         tracker = self._get_tracker(file_path)
         if not tracker.should_allow_call():

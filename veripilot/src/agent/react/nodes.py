@@ -54,6 +54,26 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Dedicated logger for LLM I/O
+llm_logger = logging.getLogger("veripilot.llm_output")
+
+
+def log_llm_request(goal_state: str, model: str, context_summary: str = "") -> None:
+    """Log LLM request details."""
+    llm_logger.info(f"=== LLM REQUEST ({model}) ===")
+    llm_logger.info(f"Goal state:\n{goal_state[:500]}")
+    if context_summary:
+        llm_logger.info(f"Context: {context_summary}")
+
+
+def log_llm_response(tactics: list[str], model: str) -> None:
+    """Log LLM response (proposed tactics)."""
+    llm_logger.info(f"=== LLM RESPONSE ({model}) ===")
+    llm_logger.info(f"Proposed {len(tactics)} tactics:")
+    for i, tactic in enumerate(tactics, 1):
+        preview = tactic[:150] + "..." if len(tactic) > 150 else tactic
+        llm_logger.info(f"  {i}. {preview}")
+
 
 # ==============================================================================
 # Prompt Loading
@@ -419,6 +439,12 @@ async def _single_shot_tactic_generation(
 
     logger.debug(f"Single-shot prompt (first 300 chars):\n{prompt[:300]}...")
 
+    # Log LLM request
+    context_summary = "single_shot"
+    if context and "theorem_name" in context:
+        context_summary += f", theorem={context['theorem_name']}"
+    log_llm_request(goal_state, model, context_summary)
+
     try:
         # LLMClient.generate() returns a string directly, not a dict
         response = await llm_client.generate(
@@ -432,6 +458,7 @@ async def _single_shot_tactic_generation(
         logger.info(f"Single-shot raw response (first 500 chars):\n{response[:500]}...")
 
         tactics = _parse_tactic_list(response)
+        log_llm_response(tactics, model)
 
         if tactics:
             logger.info(f"Single-shot generated {len(tactics)} tactics: {tactics[:5]}")
@@ -752,6 +779,12 @@ async def _generate_tactic_candidates(
     # Generate with slightly higher temperature for diversity
     gen_temp = min(0.7, temperature + 0.1)
 
+    # Log LLM request
+    context_summary = f"deep_analysis={deep_analysis}"
+    if context and "theorem_name" in context:
+        context_summary += f", theorem={context['theorem_name']}"
+    log_llm_request(goal_state, model, context_summary)
+
     try:
         response = await llm_client.generate(
             prompt,
@@ -761,6 +794,7 @@ async def _generate_tactic_candidates(
 
         # Parse tactics from response
         tactics = _parse_tactic_list(response)
+        log_llm_response(tactics[:5], model)
         return tactics[:5]  # Max 5
 
     except Exception as e:
