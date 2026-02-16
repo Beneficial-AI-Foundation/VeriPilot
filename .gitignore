@@ -211,7 +211,6 @@ __marimo__/
 CLAUDE.md 
 AGENT.md 
 claude-helpers/
-docs/
 
 # VeriPilot-specific ignores
 veripilot/data/lean_index/
