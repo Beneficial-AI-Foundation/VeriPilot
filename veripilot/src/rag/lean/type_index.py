@@ -39,10 +39,8 @@ class LeanTypeIndex(Indexer):
         Args:
             db_path: Path to DuckDB database file. Defaults to DUCKDB_PATH env var.
         """
-        self.db_path = db_path or os.getenv(
-            "DUCKDB_PATH",
-            "/workspace/data/indices/lean/types.duckdb"
-        )
+        default_db = str(Path(__file__).parent.parent.parent.parent / "data" / "indices" / "lean" / "types.duckdb")
+        self.db_path = db_path or os.getenv("DUCKDB_PATH", default_db)
 
         # Ensure directory exists
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)

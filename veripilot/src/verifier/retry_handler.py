@@ -51,16 +51,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# Default project directory for dalek benchmark
-DEFAULT_PROJECT_DIR = "/workspace/projects/VeriPilot/lean-projects/dalek-verify-lean"
-
-
 async def verify_proof(
     sorry: "SorryLocation",
     proof_result: "ProofResult",
     rag=None,  # LeanRAG instance for regeneration
     max_attempts: int = 4,
-    project_dir: str = DEFAULT_PROJECT_DIR,
+    project_dir: str = "",
     timeout: int = 300,
     audit_config: Optional[AuditConfig] = None,
 ) -> VerificationResult:
@@ -634,7 +630,7 @@ async def verify_single_sorry(
     file_path: str,
     line: int,
     proof: str,
-    project_dir: str = DEFAULT_PROJECT_DIR,
+    project_dir: str = "",
     timeout: int = 300,
 ) -> VerificationResult:
     """

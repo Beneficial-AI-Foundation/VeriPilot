@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from enum import Enum
@@ -171,7 +172,7 @@ class LeanMCPClient:
 
     def __init__(
         self,
-        command: str = "/workspace/.local/bin/uvx",
+        command: Optional[str] = None,
         args: Optional[list[str]] = None,
         env: Optional[dict[str, str]] = None,
     ):
@@ -179,17 +180,18 @@ class LeanMCPClient:
         Initialize MCP client configuration.
 
         Args:
-            command: Path to uvx or the MCP server command
+            command: Path to uvx or the MCP server command (auto-detected if None)
             args: Arguments to pass (default: ["lean-lsp-mcp"])
             env: Additional environment variables
         """
-        self.command = command
+        self.command = command or shutil.which("uvx") or "uvx"
         self.args = args or ["lean-lsp-mcp"]
 
-        # Build environment with elan path
+        # Build environment with elan path (auto-detect ELAN_HOME)
+        elan_home = os.environ.get("ELAN_HOME", str(Path.home() / ".elan"))
         self.env = {
-            "PATH": f"/workspace/.elan/bin:{os.environ.get('PATH', '')}",
-            "ELAN_HOME": "/workspace/.elan",
+            "PATH": f"{elan_home}/bin:{os.environ.get('PATH', '')}",
+            "ELAN_HOME": elan_home,
         }
         if env:
             self.env.update(env)
