@@ -227,6 +227,9 @@ veripilot/data/sources/mathlib4/
 # Don't ignore submodule tracking
 !.gitmodules
 
+# Lean project clones (local only, no longer submodules)
+lean-projects/
+
 # Test fixtures are symlinks (tracked)
 !veripilot/tests/fixtures/
 
