@@ -5,8 +5,11 @@ Formats RAG results and file context into structured
 prompt sections for LLM consumption.
 """
 
+import logging
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 from interfaces.rag_provider import RetrievalResult
 from parser import SorryLocation
@@ -151,12 +154,60 @@ def format_import_contents(
     return "## Imported File Contents\n\n" + "\n".join(sections)
 
 
+async def fetch_deepwiki_context(
+    sorry: SorryLocation,
+    timeout: float = 15.0,
+) -> Optional[str]:
+    """
+    Fetch relevant documentation from DeepWiki based on imports.
+
+    Determines which repo to query based on import patterns:
+    - Aeneas imports -> aeneas repo
+    - Otherwise -> mathlib4 repo
+
+    Args:
+        sorry: The sorry location (contains imports and theorem name)
+        timeout: Request timeout in seconds (default 15s)
+
+    Returns:
+        DeepWiki documentation as markdown section, or None if unavailable
+    """
+    try:
+        from agent.deepwiki_client import get_deepwiki_client, KNOWN_REPOS
+    except ImportError:
+        return None
+
+    if not sorry.imports:
+        return None
+
+    has_aeneas = any(
+        kw in imp
+        for imp in sorry.imports
+        for kw in ("Aeneas", "Primitives", "Diverge", "Progress", "Scalar")
+    )
+
+    repo = KNOWN_REPOS["aeneas"] if has_aeneas else KNOWN_REPOS["mathlib4"]
+    question = f"How do I prove theorems about {sorry.theorem_name}? What tactics and lemmas are commonly used?"
+
+    try:
+        client = get_deepwiki_client(timeout=timeout)
+        answer = await client.ask_question(repo, question)
+        if answer:
+            repo_short = "aeneas" if has_aeneas else "mathlib4"
+            return f"## DeepWiki Knowledge ({repo_short})\n\n{answer}"
+    except Exception as e:
+        logger.debug(f"DeepWiki query failed (non-critical): {e}")
+
+    return None
+
+
 def format_context(
     sorry: SorryLocation,
     file_content: str,
     rag_results: list[RetrievalResult],
     project_dir: Optional[str] = None,
     user_context: Optional[str] = None,
+    deepwiki_context: Optional[str] = None,
 ) -> str:
     """
     Format all context for an LLM prompt.
@@ -165,6 +216,7 @@ def format_context(
     - RAG results (lemmas, tactics, proofs)
     - File context (imports, theorem, proof prefix)
     - Import file contents (if project_dir provided)
+    - DeepWiki documentation (if pre-fetched via fetch_deepwiki_context)
     - User-provided context (if provided)
     - Proof strategy hints
 
@@ -174,6 +226,7 @@ def format_context(
         rag_results: Retrieved RAG results
         project_dir: Optional project directory for import resolution
         user_context: Optional user-provided context string
+        deepwiki_context: Optional DeepWiki documentation (pre-fetched async)
 
     Returns:
         Formatted context string for prompt
@@ -195,11 +248,15 @@ def format_context(
         if import_section:
             sections.append(import_section)
 
-    # 4. User-provided context
+    # 4. DeepWiki documentation (if available)
+    if deepwiki_context:
+        sections.append(deepwiki_context)
+
+    # 5. User-provided context
     if user_context:
         sections.append("## Additional Context\n\n" + user_context)
 
-    # 5. Proof hints
+    # 6. Proof hints
     hints_section = format_proof_hints(sorry)
     sections.append(hints_section)
 
