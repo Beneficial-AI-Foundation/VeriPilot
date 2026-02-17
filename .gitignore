@@ -212,6 +212,9 @@ CLAUDE.md
 AGENT.md 
 claude-helpers/
 
+# VeriPilot edit_file backups (crash recovery)
+*.vp_backup
+
 # VeriPilot-specific ignores
 veripilot/data/lean_index/
 veripilot/data/verus_index/

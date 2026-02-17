@@ -195,29 +195,69 @@ class ReActAgent:
 
         # Dispatch based on mode
         if self.mode == AgentMode.JUST_RETRY:
-            return await self._run_just_retry(
+            result = await self._run_just_retry(
                 sorry, initial_proof, file_content,
                 verifier_service, rag, start_time
             )
         elif self.mode == AgentMode.REACT:
-            return await self._run_react(
+            result = await self._run_react(
                 sorry, initial_proof, file_content, goal_state,
                 verifier_service, rag, on_step, start_time, resolved_project_dir
             )
         elif self.mode == AgentMode.OM_REACT:
-            # OpenManus error recovery mode
-            return await self._run_om_react(
+            result = await self._run_om_react(
                 sorry, initial_proof, file_content, goal_state,
                 verifier_service, rag, on_step, start_time, resolved_project_dir
             )
         elif self.mode == AgentMode.ROMA:
-            # ROMA hierarchical decomposition mode
-            return await self._run_roma(
+            result = await self._run_roma(
                 sorry, initial_proof, file_content, goal_state,
                 verifier_service, rag, on_step, start_time, resolved_project_dir
             )
         else:
             raise ValueError(f"Unknown mode: {self.mode}")
+
+        # Create output file if agent succeeded via edit_file path
+        # (file is modified in-place; copy it, then revert original)
+        if result.success and not result.output_file:
+            await self._create_output_and_revert(
+                sorry, result, verifier_service
+            )
+
+        return result
+
+    async def _create_output_and_revert(
+        self,
+        sorry: "SorryLocation",
+        result: ReActResult,
+        verifier_service: Optional["VerifierService"],
+    ) -> None:
+        """Create _VP{N}.lean output file from modified file, then revert original.
+
+        When edit_file succeeds, the original file has the proof in place of sorry.
+        This copies it as the output file then restores from disk-based .vp_backup.
+        If anything crashes, the .vp_backup file persists on disk for recovery.
+        """
+        file_path = str(sorry.file_path)
+        try:
+            from verifier.file_modifier import create_attempt_copy
+            result.output_file = create_attempt_copy(file_path, result.attempts or 1)
+            logger.info(f"Created output file: {result.output_file}")
+
+            # Revert original from disk backup (.vp_backup)
+            if verifier_service and hasattr(verifier_service, '_mcp_client'):
+                await verifier_service._mcp_client.revert_file(file_path)
+            else:
+                # No MCP client — try direct disk backup recovery
+                from pathlib import Path as _Path
+                backup = _Path(file_path).with_suffix(".vp_backup")
+                if backup.exists():
+                    import shutil as _shutil
+                    _shutil.copy2(backup, file_path)
+                    backup.unlink()
+                    logger.debug(f"Reverted original file from disk backup: {file_path}")
+        except Exception as e:
+            logger.warning(f"Failed to create output file: {e}")
 
     async def _run_just_retry(
         self,

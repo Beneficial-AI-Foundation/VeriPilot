@@ -212,8 +212,8 @@ class LeanMCPClient:
         # Per-file circuit breakers
         self._file_trackers: dict[str, FailureTracker] = {}
 
-        # File backups for safe edit/revert
-        self._file_backups: dict[str, str] = {}
+        # File backups for safe edit/revert (disk-based for crash safety)
+        self._file_backups: dict[str, Path] = {}  # file_path -> backup_path
 
         # File warmup tracking
         self._warmed_files: set[str] = set()
@@ -289,6 +289,28 @@ class LeanMCPClient:
             self._file_trackers[file_path] = FailureTracker(threshold=3, cooldown_seconds=30.0)
         return self._file_trackers[file_path]
 
+    @staticmethod
+    def recover_orphaned_backups(directory: str) -> list[str]:
+        """Restore any .vp_backup files left by a crashed session.
+
+        Call this before starting verification on a directory to ensure
+        no files are left in a modified state from a previous crash.
+
+        Returns list of restored file paths.
+        """
+        restored = []
+        for backup in Path(directory).rglob("*.vp_backup"):
+            original = backup.with_suffix(".lean")
+            if original.exists():
+                shutil.copy2(backup, original)
+                backup.unlink()
+                logger.info(f"Recovered orphaned backup: {original}")
+                restored.append(str(original))
+            else:
+                logger.warning(f"Orphaned backup has no original, removing: {backup}")
+                backup.unlink()
+        return restored
+
     async def warmup_file(self, file_path: str, timeout: float = 30.0) -> bool:
         """
         Warm up a file by requesting diagnostics.
@@ -298,6 +320,13 @@ class LeanMCPClient:
 
         Returns True if warmup succeeded.
         """
+        # Recover any orphaned backups for this file before warming up
+        backup = Path(file_path).with_suffix(".vp_backup")
+        if backup.exists():
+            shutil.copy2(backup, file_path)
+            backup.unlink()
+            logger.warning(f"Recovered orphaned backup before warmup: {file_path}")
+
         if file_path in self._warmed_files:
             logger.debug(f"File already warmed: {file_path}")
             return True
@@ -506,9 +535,11 @@ class LeanMCPClient:
         if not path.exists():
             return (False, None, f"File not found: {file_path}")
 
-        # 1. Backup file
+        # 1. Backup file to disk (survives process crashes)
+        backup_path = path.with_suffix(".vp_backup")
+        shutil.copy2(file_path, backup_path)
+        self._file_backups[file_path] = backup_path
         original_content = path.read_text()
-        self._file_backups[file_path] = original_content
 
         try:
             # 2. Get baseline goal state
@@ -551,6 +582,17 @@ class LeanMCPClient:
                 return (False, None, "Lost proof context after tactic")
 
             if new_goal.is_complete:
+                # Check full-file diagnostics before declaring success.
+                # Some errors (e.g., @[progress] self-application causing
+                # "fail to show termination") appear at the theorem declaration
+                # line, not at the tactic line we edited.
+                full_diagnostics = await self.get_diagnostics(file_path)
+                full_errors = [d for d in full_diagnostics if d.severity == "error"]
+                if full_errors:
+                    error_msg = "; ".join(e.message for e in full_errors[:3])
+                    logger.warning(f"Proof appears complete but file has errors: {error_msg}")
+                    await self.revert_file(file_path)
+                    return (False, None, f"Proof closed goals but caused errors: {error_msg}")
                 logger.info(f"Tactic completed proof at {file_path}:{line}")
                 return (True, "no goals", None)
 
@@ -570,14 +612,22 @@ class LeanMCPClient:
             return (False, None, f"Exception during edit: {e}")
 
     async def revert_file(self, file_path: str) -> bool:
-        """Revert a file to its backed-up content."""
-        if file_path not in self._file_backups:
-            logger.warning(f"No backup found for {file_path}")
-            return False
+        """Revert a file from its disk-based backup (.vp_backup)."""
+        backup_path = self._file_backups.get(file_path)
+        if not backup_path or not backup_path.exists():
+            # Fallback: check for backup file on disk even if not tracked
+            fallback = Path(file_path).with_suffix(".vp_backup")
+            if fallback.exists():
+                backup_path = fallback
+            else:
+                logger.warning(f"No backup found for {file_path}")
+                return False
 
         try:
-            Path(file_path).write_text(self._file_backups[file_path])
-            logger.debug(f"Reverted {file_path} to backup")
+            shutil.copy2(backup_path, file_path)
+            backup_path.unlink()  # Clean up backup
+            self._file_backups.pop(file_path, None)
+            logger.debug(f"Reverted {file_path} from disk backup")
             await asyncio.sleep(0.5)  # Let Lean reprocess
             return True
         except Exception as e:
