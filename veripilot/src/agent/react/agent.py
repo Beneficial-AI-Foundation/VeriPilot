@@ -171,6 +171,7 @@ class ReActAgent:
         goal_state: str = "",
         on_step: Optional[callable] = None,
         project_dir: Optional[str] = None,
+        sorry_idx: int = 1,
     ) -> ReActResult:
         """
         Run proof verification with the configured mode.
@@ -184,6 +185,7 @@ class ReActAgent:
             goal_state: Initial goal state from LSP
             on_step: Optional callback for step updates
             project_dir: Lean project root (overrides instance default)
+            sorry_idx: 1-based sorry index (for console exhaustion reporting)
 
         Returns:
             ReActResult with verification outcome and trace
@@ -224,7 +226,53 @@ class ReActAgent:
                 sorry, result, verifier_service
             )
 
+        # Report exhaustion when all attempts failed
+        if not result.success:
+            self._report_exhaustion(result, sorry_idx)
+
         return result
+
+    def _report_exhaustion(
+        self, result: ReActResult, sorry_idx: int
+    ) -> None:
+        """Print sorry-exhausted summary from attempt records if available."""
+        try:
+            from cli.console_output import print_sorry_exhausted
+        except ImportError:
+            return
+
+        # Build tried_summary: group by error_type, count each
+        # Attempt records live on the result's observations or errors.
+        # Heuristic: parse error strings for known error types.
+        error_counts: dict[str, int] = {}
+        for err in result.errors:
+            err_lower = err.lower()
+            if "type_mismatch" in err_lower or "type mismatch" in err_lower:
+                error_counts["type_mismatch"] = (
+                    error_counts.get("type_mismatch", 0) + 1
+                )
+            elif "unknown_identifier" in err_lower or "unknown identifier" in err_lower:
+                error_counts["unknown_identifier"] = (
+                    error_counts.get("unknown_identifier", 0) + 1
+                )
+            elif "tactic" in err_lower and "failed" in err_lower:
+                error_counts["tactic_failed"] = (
+                    error_counts.get("tactic_failed", 0) + 1
+                )
+            else:
+                error_counts["other"] = error_counts.get("other", 0) + 1
+
+        if error_counts:
+            tried_summary = ", ".join(
+                f"{etype} ({count}x)"
+                for etype, count in sorted(
+                    error_counts.items(), key=lambda x: -x[1]
+                )
+            )
+        else:
+            tried_summary = f"{result.attempts} attempts, no details"
+
+        print_sorry_exhausted(sorry_idx, self.max_attempts, tried_summary)
 
     async def _create_output_and_revert(
         self,

@@ -58,6 +58,27 @@ logger = logging.getLogger(__name__)
 # Dedicated logger for LLM I/O
 llm_logger = logging.getLogger("veripilot.llm_output")
 
+# Strategy shift: after this many consecutive outer failures with zero
+# successful candidates, inject a "try something fundamentally different"
+# prompt to break out of repetitive failure patterns.
+STRATEGY_SHIFT_THRESHOLD = 5
+
+STRATEGY_SHIFT_PROMPT = """## Strategy Shift Required
+
+The following {n} approaches have ALL FAILED on this goal:
+
+{failed_summary}
+
+These approaches are NOT WORKING. You MUST try something fundamentally different:
+- If you were using `simp`/`rfl`/automation, try manual `unfold` + explicit rewriting with `rw`
+- If you were applying lemmas directly, try `have` blocks with intermediate steps
+- If you were doing case analysis, try a direct algebraic approach (`ring`, `omega`)
+- If you were using `rw`, try `conv` or `simp only [specific_lemma]`
+- If everything failed, try term-mode proof (`exact ...`) or a small helper lemma
+
+Do NOT repeat any approach from the failed list above.
+"""
+
 
 def log_llm_request(goal_state: str, model: str, context_summary: str = "") -> None:
     """Log LLM request details."""
@@ -601,6 +622,10 @@ async def iterative_tactic_loop(
     attempt_records: list[AttemptRecord] = []
     current_goal = goal_state
     consecutive_failures = 0
+    # Track total consecutive outer failures across the whole loop
+    # (never reset by re-analysis threshold, only by actual success).
+    # Fed to _generate_tactic_candidates for strategy shift detection.
+    total_consecutive_failures = 0
     llm_client = LLMClient()
     normalizer = ErrorMessageNormalizer()
 
@@ -669,6 +694,7 @@ async def iterative_tactic_loop(
             context=context,
             deep_analysis=needs_reanalysis,
             attempt_history=attempt_records,
+            consecutive_failures=total_consecutive_failures,
         )
 
         if not candidates:
@@ -676,6 +702,7 @@ async def iterative_tactic_loop(
                 f"No tactic candidates generated at step {step}"
             )
             consecutive_failures += 1
+            total_consecutive_failures += 1
             continue
 
         # Try candidates using edit_file_with_capture
@@ -721,6 +748,7 @@ async def iterative_tactic_loop(
                 tactics_applied.append(candidate)
                 current_goal = new_goal_str
                 consecutive_failures = 0
+                total_consecutive_failures = 0
                 success_found = True
                 logger.info(
                     f"Step {step}: "
@@ -767,6 +795,22 @@ async def iterative_tactic_loop(
 
                 # Normalize error and create AttemptRecord
                 normalized = normalizer.normalize(error_msg)
+
+                # RAG lookup for unknown identifiers
+                rag_suggestions: list[str] = []
+                if normalized.error_type == "unknown_identifier":
+                    id_match = re.search(
+                        r"unknown identifier '([^']+)'",
+                        error_msg,
+                        re.IGNORECASE,
+                    )
+                    if id_match:
+                        rag_suggestions = (
+                            await _suggest_identifier_corrections(
+                                id_match.group(1)
+                            )
+                        )
+
                 record = AttemptRecord(
                     number=len(attempt_records) + 1,
                     snippet=candidate,
@@ -774,7 +818,7 @@ async def iterative_tactic_loop(
                     error_type=normalized.error_type,
                     goal_state_after=new_goal_str or "",
                     suggestion=normalized.suggestion,
-                    rag_suggestions=[],
+                    rag_suggestions=rag_suggestions,
                     elapsed_seconds=candidate_elapsed,
                 )
                 attempt_records.append(record)
@@ -793,6 +837,7 @@ async def iterative_tactic_loop(
 
         if not success_found:
             consecutive_failures += 1
+            total_consecutive_failures += 1
             logger.debug(
                 f"Step {step}: No tactic succeeded, "
                 f"failures={consecutive_failures}"
@@ -880,6 +925,7 @@ async def _generate_tactic_candidates(
     context: Optional[dict[str, Any]],
     deep_analysis: bool,
     attempt_history: list[AttemptRecord],
+    consecutive_failures: int = 0,
 ) -> list[str]:
     """
     Generate candidate tactics for the current goal state.
@@ -888,6 +934,10 @@ async def _generate_tactic_candidates(
     (snippet + normalized error + goal state + suggestion)
     so the LLM can learn from previous failures.
 
+    When consecutive_failures >= STRATEGY_SHIFT_THRESHOLD, injects a
+    strategy shift prompt to force the LLM to try fundamentally
+    different approaches.
+
     Args:
         goal_state: Current goal state
         model: LLM model to use
@@ -895,6 +945,9 @@ async def _generate_tactic_candidates(
         context: Additional context (theorem_name, etc.)
         deep_analysis: If True, do full re-analysis
         attempt_history: Structured records of previous attempts
+        consecutive_failures: Count of consecutive outer failures
+            (no candidate succeeded). Triggers strategy shift when
+            >= STRATEGY_SHIFT_THRESHOLD.
 
     Returns:
         List of 3-5 candidate tactics to try
@@ -907,7 +960,28 @@ async def _generate_tactic_candidates(
     system_prompt = _load_iterative_system_prompt()
 
     # Build user prompt for snippet generation
-    prompt_lines = [
+    prompt_lines = []
+
+    # Strategy shift: inject "try something different" prompt before goal
+    if consecutive_failures >= STRATEGY_SHIFT_THRESHOLD:
+        failed_summary = "\n".join(
+            f"- `{a['snippet'][:100]}` -> "
+            f"{a['error_type']}: {a['normalized_error'][:80]}"
+            for a in attempt_history[-consecutive_failures:]
+        )
+        prompt_lines.append(
+            STRATEGY_SHIFT_PROMPT.format(
+                n=consecutive_failures,
+                failed_summary=failed_summary,
+            )
+        )
+        prompt_lines.append("")
+        logger.info(
+            f"Strategy shift triggered after "
+            f"{consecutive_failures} consecutive failures"
+        )
+
+    prompt_lines.extend([
         "Generate 1-3 atomic proof snippets for this goal state.",
         "",
         "## Current Goal State",
@@ -915,7 +989,7 @@ async def _generate_tactic_candidates(
         goal_state,
         "```",
         "",
-    ]
+    ])
 
     # Add context if available
     if context:
@@ -981,6 +1055,10 @@ async def _generate_tactic_candidates(
     # Generate with slightly higher temperature for diversity
     gen_temp = min(0.7, temperature + 0.1)
 
+    # Increase temperature further during strategy shift to encourage novelty
+    if consecutive_failures >= STRATEGY_SHIFT_THRESHOLD:
+        gen_temp = min(0.9, gen_temp + 0.2)
+
     # Log LLM request
     context_summary = f"deep_analysis={deep_analysis}"
     if context and "theorem_name" in context:
@@ -1004,6 +1082,48 @@ async def _generate_tactic_candidates(
         logger.warning(f"Tactic generation failed: {e}")
         # Return some default tactics
         return ["simp", "ring", "omega"]
+
+
+async def _suggest_identifier_corrections(identifier: str) -> list[str]:
+    """Query RAG when Lean reports an unknown identifier.
+
+    Strategy:
+    1. Try exact name lookup via LeanTypeIndex.query_by_name()
+    2. If no results, try fuzzy search via LeanTypeIndex.query()
+    3. Limit to top 3 suggestions
+    4. Gracefully degrade: return empty list if index unavailable
+    """
+    import asyncio
+
+    try:
+        from rag.lean.type_index import LeanTypeIndex
+
+        index = LeanTypeIndex()  # Uses default db_path from env
+
+        # Level 1: exact name (catches namespace issues like
+        # add_comm -> Nat.add_comm)
+        results = await asyncio.wait_for(
+            index.query_by_name(identifier, limit=3),
+            timeout=2.0,
+        )
+        if results:
+            return [r.full_name for r in results]
+
+        # Level 2: fuzzy search (catches typos)
+        results = await asyncio.wait_for(
+            index.query(identifier, limit=3),
+            timeout=2.0,
+        )
+        if results:
+            return [r.full_name for r in results]
+
+        return []
+    except Exception as e:
+        logger.debug(
+            f"RAG lookup for '{identifier}' failed "
+            f"(graceful degradation): {e}"
+        )
+        return []
 
 
 def _parse_tactic_list(response: str) -> list[str]:
