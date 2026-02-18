@@ -611,6 +611,163 @@ class LeanMCPClient:
             await self.revert_file(file_path)
             return (False, None, f"Exception during edit: {e}")
 
+    async def edit_file_with_capture(
+        self,
+        file_path: str,
+        line: int,
+        tactic: str,
+        column: Optional[int] = None,
+    ) -> tuple[bool, Optional[str], Optional[str], Optional[str]]:
+        """
+        Like edit_file(), but also returns the modified file content.
+
+        Returns:
+            (success, new_goal_state, error_msg, modified_content)
+            modified_content is the file text with the snippet inserted,
+            captured before any revert. None only if the edit never happened
+            (file not found, no sorry on line, etc.).
+        """
+        path = Path(file_path)
+        if not path.exists():
+            return (False, None, f"File not found: {file_path}", None)
+
+        # 1. Backup file to disk (survives process crashes)
+        backup_path = path.with_suffix(".vp_backup")
+        shutil.copy2(file_path, backup_path)
+        self._file_backups[file_path] = backup_path
+        original_content = path.read_text()
+
+        try:
+            # 2. Get baseline goal state
+            baseline_goal = await self.get_goal(file_path, line, column)
+            if baseline_goal is None:
+                return (
+                    False, None,
+                    "No proof context at target position", None,
+                )
+
+            # 3. Replace sorry with tactic (preserving indent)
+            lines = original_content.splitlines(keepends=True)
+            if line < 1 or line > len(lines):
+                msg = (
+                    f"Line {line} out of range "
+                    f"(file has {len(lines)} lines)"
+                )
+                return (False, None, msg, None)
+
+            target_line = lines[line - 1]
+            if "sorry" not in target_line.lower():
+                return (
+                    False, None,
+                    f"No 'sorry' found on line {line}", None,
+                )
+
+            new_line = target_line.replace("sorry", tactic, 1)
+            lines[line - 1] = new_line
+            path.write_text("".join(lines))
+
+            # Capture the modified content immediately after write
+            modified_content = path.read_text()
+
+            logger.debug(
+                f"Edited {file_path}:{line} -- "
+                f"replaced sorry with: {tactic}"
+            )
+
+            # 4. Wait for Lean to reprocess
+            await asyncio.sleep(0.5)
+
+            # 5. Check new goal state
+            new_goal = await self.get_goal(
+                file_path, line, column,
+            )
+
+            # Check for errors at the edited line
+            diagnostics = await self.get_diagnostics(
+                file_path, start_line=line, end_line=line,
+            )
+            errors = [d for d in diagnostics if d.severity == "error"]
+
+            if errors:
+                error_msg = "; ".join(
+                    e.message for e in errors[:3]
+                )
+                logger.debug(f"Tactic caused errors: {error_msg}")
+                await self.revert_file(file_path)
+                return (
+                    False, None,
+                    f"Tactic caused errors: {error_msg}",
+                    modified_content,
+                )
+
+            if new_goal is None:
+                await self.revert_file(file_path)
+                return (
+                    False, None,
+                    "Lost proof context after tactic",
+                    modified_content,
+                )
+
+            if new_goal.is_complete:
+                # Check full-file diagnostics before success
+                full_diags = await self.get_diagnostics(file_path)
+                full_errors = [
+                    d for d in full_diags if d.severity == "error"
+                ]
+                if full_errors:
+                    error_msg = "; ".join(
+                        e.message for e in full_errors[:3]
+                    )
+                    logger.warning(
+                        "Proof appears complete but file has "
+                        f"errors: {error_msg}"
+                    )
+                    await self.revert_file(file_path)
+                    msg = (
+                        "Proof closed goals but caused "
+                        f"errors: {error_msg}"
+                    )
+                    return (False, None, msg, modified_content)
+                logger.info(
+                    f"Tactic completed proof at {file_path}:{line}"
+                )
+                return (True, "no goals", None, modified_content)
+
+            # Check if goals changed
+            if new_goal.goals_after != baseline_goal.goals_after:
+                logger.info(
+                    f"Tactic made progress at {file_path}:{line}"
+                )
+                return (
+                    True, new_goal.goals_after,
+                    None, modified_content,
+                )
+
+            # No progress
+            logger.debug(
+                f"Tactic made no progress at {file_path}:{line}"
+            )
+            await self.revert_file(file_path)
+            return (
+                False, None,
+                "Tactic made no progress", modified_content,
+            )
+
+        except Exception as e:
+            logger.error(f"Error during edit_file_with_capture: {e}")
+            # Try to capture modified content if write happened
+            try:
+                mc = path.read_text()
+                if mc == original_content:
+                    mc = None
+            except Exception:
+                mc = None
+            await self.revert_file(file_path)
+            return (
+                False, None,
+                f"Exception during edit: {e}", mc,
+            )
+
     async def revert_file(self, file_path: str) -> bool:
         """Revert a file from its disk-based backup (.vp_backup)."""
         backup_path = self._file_backups.get(file_path)

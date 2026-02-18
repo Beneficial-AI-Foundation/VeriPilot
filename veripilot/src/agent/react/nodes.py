@@ -18,36 +18,37 @@ import time
 from typing import Any, Optional, TYPE_CHECKING
 
 from .state import (
+    ActionRecord,
+    AttemptRecord,
+    GoalAnalysis,
+    HypothesisInfo,
+    ObservationRecord,
     ProofState,
     ProofStatus,
-    ThoughtRecord,
-    ActionRecord,
-    ObservationRecord,
     RecoveryRecord,
-    HypothesisInfo,
-    GoalAnalysis,
-    add_thought,
+    SubTaskRecord,
+    ThoughtRecord,
     add_action,
     add_observation,
+    add_thought,
     dict_to_sorry,
     should_backtrack,
 )
 from .error_recovery import (
     ErrorRecoveryController,
-    TacticModifier,
-    RecoveryContext,
     ErrorSeverity,
+    RecoveryContext,
     RecoveryStrategy,
+    TacticModifier,
 )
 from .roma import (
+    Atomizer,
     GoalComplexity,
     GoalComplexityAnalyzer,
-    Atomizer,
-    RomaPlanner,
     RomaAggregator,
+    RomaPlanner,
     SubProof,
 )
-from .state import SubTaskRecord
 
 if TYPE_CHECKING:
     from verifier.verifier_service import VerifierService
@@ -551,101 +552,152 @@ async def iterative_tactic_loop(
     max_steps: int = 15,
     consecutive_failure_threshold: int = 3,
     context: Optional[dict[str, Any]] = None,
-    mcp_client: Optional[Any] = None,  # Connected MCP client (from VerifierService)
-) -> tuple[list[str], bool, str]:
+    mcp_client: Optional[Any] = None,
+    attempt_number: int = 1,
+    sorry_index: int = 1,
+) -> tuple[list[str], bool, str, list[AttemptRecord]]:
     """
-    Iteratively apply tactics using MCP edit_file for safe edit-check-revert testing.
+    Iteratively apply tactics using MCP edit_file_with_capture.
 
     Two-level attempt model:
-    - OUTER attempts: controlled by --max-attempts (default 5), user-visible, VP files numbered by this
-    - INNER steps: max_steps parameter (default 15), implementation detail, tactic candidates per outer attempt
-
-    This is the core iterative refinement loop that addresses the "single-shot"
-    architecture limitation. Instead of generating all tactics in one shot,
-    it generates candidates, tests each via edit_file (which handles backup,
-    edit, check, and revert internally), and re-evaluates based on the actual
-    goal state change.
+    - OUTER attempts: controlled by --max-attempts (default 5),
+      user-visible, VP files numbered by this
+    - INNER steps: max_steps parameter (default 15),
+      implementation detail, tactic candidates per outer attempt
 
     Args:
         goal_state: Current goal state from LSP
         file_path: Absolute path to the Lean file
-        line: Line number where tactic should be applied (1-indexed)
+        line: Line number where tactic should be applied
         model: LLM model to use for tactic generation
         temperature: Temperature for LLM generation
-        max_steps: Maximum number of tactics to try (default 15)
-        consecutive_failure_threshold: Re-analyze after N consecutive failures
-        context: Optional additional context (theorem_name, hypotheses, etc.)
-        mcp_client: Optional connected MCP client (LeanMCPClient).
-                   If None, falls back to single-shot tactic generation.
+        max_steps: Maximum number of tactics to try
+        consecutive_failure_threshold: Re-analyze after N failures
+        context: Optional additional context
+        mcp_client: Optional connected MCP client (LeanMCPClient)
+        attempt_number: Outer attempt number (VP file naming)
+        sorry_index: Sorry index (console output)
 
     Returns:
-        Tuple of (tactics_applied, success, final_goal_state):
-        - tactics_applied: List of tactics that succeeded (changed goal state)
-        - success: True if goal was closed ("no goals")
-        - final_goal_state: The final goal state after all tactics
-
-    Design:
-        Uses "adaptive re-analysis" - lightweight checks after each tactic
-        (did goal change? any goals left?), escalates to full re-analysis
-        (re-parse goal, reconsider strategy) after consecutive failures.
-
-        If MCP is unavailable, falls back to single-shot generation (generates
-        all tactics in one LLM call without interactive testing).
+        (tactics_applied, success, final_goal_state, attempt_records)
     """
     from agent.llm_client import LLMClient
+    from verifier.error_normalizer import ErrorMessageNormalizer
+    from pathlib import Path as _Path
+
+    # Console output (graceful degradation)
+    try:
+        from cli.console_output import (
+            print_attempt_start,
+            print_attempt_trying,
+            print_attempt_success,
+            print_attempt_failure,
+        )
+        _has_console = True
+    except ImportError:
+        _has_console = False
 
     tactics_applied: list[str] = []
+    attempt_records: list[AttemptRecord] = []
     current_goal = goal_state
     consecutive_failures = 0
     llm_client = LLMClient()
+    normalizer = ErrorMessageNormalizer()
 
     # Check if MCP is available for iterative testing
     if mcp_client is None:
-        logger.warning("MCP client not available - falling back to single-shot generation")
-        return await _single_shot_tactic_generation(
-            goal_state=goal_state,
-            model=model,
-            temperature=temperature,
-            context=context,
-            llm_client=llm_client,
+        logger.warning(
+            "MCP client not available - "
+            "falling back to single-shot generation"
+        )
+        tactics, success, final_goal = (
+            await _single_shot_tactic_generation(
+                goal_state=goal_state,
+                model=model,
+                temperature=temperature,
+                context=context,
+                llm_client=llm_client,
+            )
+        )
+        return tactics, success, final_goal, []
+
+    logger.info(
+        f"Starting iterative tactic loop: "
+        f"max_steps={max_steps}, attempt={attempt_number}"
+    )
+
+    # Print attempt start
+    if _has_console:
+        print_attempt_start(
+            sorry_index, attempt_number,
+            max_steps, current_goal,
         )
 
-    logger.info(f"Starting iterative tactic loop: max_steps={max_steps}")
+    step_start_time = time.time()
 
     for step in range(max_steps):
         # Check if goal is already closed
         if _is_goal_closed(current_goal):
+            elapsed = time.time() - step_start_time
             logger.info(f"Goal closed after {step} steps")
-            return tactics_applied, True, current_goal
+            if _has_console:
+                print_attempt_success(
+                    sorry_index, attempt_number,
+                    max_steps, elapsed,
+                )
+            return (
+                tactics_applied, True,
+                current_goal, attempt_records,
+            )
 
         # Check if we need full re-analysis
-        needs_reanalysis = consecutive_failures >= consecutive_failure_threshold
+        needs_reanalysis = (
+            consecutive_failures >= consecutive_failure_threshold
+        )
         if needs_reanalysis:
-            logger.info(f"Triggering re-analysis after {consecutive_failures} failures")
-            consecutive_failures = 0  # Reset counter
+            logger.info(
+                f"Triggering re-analysis after "
+                f"{consecutive_failures} failures"
+            )
+            consecutive_failures = 0
 
-        # Generate candidate tactics
+        # Generate candidates using structured sliding window
         candidates = await _generate_tactic_candidates(
             goal_state=current_goal,
             model=model,
             temperature=temperature,
             context=context,
             deep_analysis=needs_reanalysis,
-            tried_tactics=tactics_applied,
+            attempt_history=attempt_records,
         )
 
         if not candidates:
-            logger.warning(f"No tactic candidates generated at step {step}")
+            logger.warning(
+                f"No tactic candidates generated at step {step}"
+            )
             consecutive_failures += 1
             continue
 
-        # Try candidates using edit_file (safe edit-check-revert loop)
+        # Try candidates using edit_file_with_capture
         from verifier.mcp_client import MCPWorkerCrashError
 
         success_found = False
+        last_modified_content: Optional[str] = None
+        last_error_msg: Optional[str] = None
+
         for candidate in candidates:
+            # Print what we're trying
+            if _has_console:
+                print_attempt_trying(
+                    sorry_index, attempt_number, candidate,
+                )
+
+            candidate_start = time.time()
             try:
-                made_progress, new_goal_str, error_msg = await mcp_client.edit_file(
+                (
+                    made_progress, new_goal_str,
+                    error_msg, modified_content,
+                ) = await mcp_client.edit_file_with_capture(
                     file_path=file_path,
                     line=line,
                     tactic=candidate,
@@ -653,30 +705,120 @@ async def iterative_tactic_loop(
             except MCPWorkerCrashError:
                 raise  # Let caller handle crash recovery
             except Exception as e:
-                logger.warning(f"edit_file failed for '{candidate[:50]}': {e}")
+                logger.warning(
+                    f"edit_file_with_capture failed "
+                    f"for '{candidate[:50]}': {e}"
+                )
                 continue
+
+            # Track last modified content for VP file
+            if modified_content is not None:
+                last_modified_content = modified_content
+
+            candidate_elapsed = time.time() - candidate_start
 
             if made_progress and new_goal_str:
                 tactics_applied.append(candidate)
                 current_goal = new_goal_str
                 consecutive_failures = 0
                 success_found = True
-                logger.info(f"Step {step}: '{candidate[:50]}...' succeeded")
+                logger.info(
+                    f"Step {step}: "
+                    f"'{candidate[:50]}...' succeeded"
+                )
 
                 if _is_goal_closed(new_goal_str):
-                    logger.info(f"Goal closed by tactic: {candidate[:50]}...")
-                    return tactics_applied, True, current_goal
+                    elapsed = time.time() - step_start_time
+                    logger.info(
+                        f"Goal closed by tactic: "
+                        f"{candidate[:50]}..."
+                    )
+                    if _has_console:
+                        print_attempt_success(
+                            sorry_index, attempt_number,
+                            max_steps, elapsed,
+                        )
+
+                    # Write VP file with successful content
+                    if last_modified_content is not None:
+                        original = _Path(file_path)
+                        vp_name = (
+                            f"{original.stem}"
+                            f"_VP{attempt_number}"
+                            f"{original.suffix}"
+                        )
+                        vp_path = original.parent / vp_name
+                        vp_path.write_text(last_modified_content)
+                        logger.debug(
+                            f"Created VP file: {vp_path}"
+                        )
+
+                    return (
+                        tactics_applied, True,
+                        current_goal, attempt_records,
+                    )
                 break
             elif error_msg:
-                logger.debug(f"Step {step}: '{candidate[:50]}' — {error_msg}")
+                last_error_msg = error_msg
+                logger.debug(
+                    f"Step {step}: "
+                    f"'{candidate[:50]}' -- {error_msg}"
+                )
+
+                # Normalize error and create AttemptRecord
+                normalized = normalizer.normalize(error_msg)
+                record = AttemptRecord(
+                    number=len(attempt_records) + 1,
+                    snippet=candidate,
+                    normalized_error=normalized.normalized,
+                    error_type=normalized.error_type,
+                    goal_state_after=new_goal_str or "",
+                    suggestion=normalized.suggestion,
+                    rag_suggestions=[],
+                    elapsed_seconds=candidate_elapsed,
+                )
+                attempt_records.append(record)
+
+        # After trying all candidates, write VP file
+        if last_modified_content is not None:
+            original = _Path(file_path)
+            vp_name = (
+                f"{original.stem}"
+                f"_VP{attempt_number}"
+                f"{original.suffix}"
+            )
+            vp_path = original.parent / vp_name
+            vp_path.write_text(last_modified_content)
+            logger.debug(f"Created VP file: {vp_path}")
 
         if not success_found:
             consecutive_failures += 1
-            logger.debug(f"Step {step}: No tactic succeeded, failures={consecutive_failures}")
+            logger.debug(
+                f"Step {step}: No tactic succeeded, "
+                f"failures={consecutive_failures}"
+            )
+            # Print failure for this step
+            if _has_console and last_error_msg:
+                error_summary = last_error_msg[:100]
+                print_attempt_failure(
+                    sorry_index, attempt_number,
+                    max_steps, error_summary,
+                )
 
     # Max steps reached
-    logger.info(f"Max steps ({max_steps}) reached, applied {len(tactics_applied)} tactics")
-    return tactics_applied, False, current_goal
+    logger.info(
+        f"Max steps ({max_steps}) reached, "
+        f"applied {len(tactics_applied)} tactics"
+    )
+    if _has_console:
+        print_attempt_failure(
+            sorry_index, attempt_number,
+            max_steps, "max steps reached",
+        )
+    return (
+        tactics_applied, False,
+        current_goal, attempt_records,
+    )
 
 
 def _is_goal_closed(goal_state: str) -> bool:
@@ -737,18 +879,22 @@ async def _generate_tactic_candidates(
     temperature: float,
     context: Optional[dict[str, Any]],
     deep_analysis: bool,
-    tried_tactics: list[str],
+    attempt_history: list[AttemptRecord],
 ) -> list[str]:
     """
     Generate candidate tactics for the current goal state.
+
+    Uses a structured sliding window of the last 3 attempts
+    (snippet + normalized error + goal state + suggestion)
+    so the LLM can learn from previous failures.
 
     Args:
         goal_state: Current goal state
         model: LLM model to use
         temperature: Temperature for generation
         context: Additional context (theorem_name, etc.)
-        deep_analysis: If True, do full re-analysis (more thorough)
-        tried_tactics: Tactics already tried (to avoid repetition)
+        deep_analysis: If True, do full re-analysis
+        attempt_history: Structured records of previous attempts
 
     Returns:
         List of 3-5 candidate tactics to try
@@ -774,27 +920,53 @@ async def _generate_tactic_candidates(
     # Add context if available
     if context:
         if "theorem_name" in context:
-            prompt_lines.append(f"**Theorem:** {context['theorem_name']}")
+            prompt_lines.append(
+                f"**Theorem:** {context['theorem_name']}"
+            )
         if "hypotheses" in context:
-            prompt_lines.append(f"**Key Hypotheses:** {context['hypotheses']}")
+            prompt_lines.append(
+                f"**Key Hypotheses:** {context['hypotheses']}"
+            )
         prompt_lines.append("")
 
-    # Add tried tactics to avoid repetition
-    if tried_tactics:
+    # Structured sliding window of recent attempts (last 3)
+    if attempt_history:
         prompt_lines.extend([
-            "## Already Tried (do NOT repeat these)",
-            "\n".join(f"- `{t[:100]}`" for t in tried_tactics[-5:]),
-            "",
+            "## Recent Attempts (last 3 -- do NOT repeat these)",
         ])
+        for attempt in attempt_history[-3:]:
+            prompt_lines.extend([
+                f"### Attempt {attempt['number']}",
+                f"**Tried:** `{attempt['snippet'][:200]}`",
+                f"**Error:** {attempt['normalized_error']}",
+                f"**Suggestion:** {attempt['suggestion']}",
+            ])
+            if attempt['goal_state_after']:
+                goal_preview = attempt['goal_state_after'][:300]
+                prompt_lines.append(
+                    f"**Goal after:** ```{goal_preview}```"
+                )
+            if attempt['rag_suggestions']:
+                alts = ', '.join(
+                    f'`{s}`'
+                    for s in attempt['rag_suggestions'][:3]
+                )
+                prompt_lines.append(
+                    f"**Did you mean:** {alts}"
+                )
+            prompt_lines.append("")
 
     # Add guidance based on analysis depth
     if deep_analysis:
         prompt_lines.extend([
             "## Re-analysis Mode",
-            "Previous approaches failed repeatedly. Try something fundamentally different:",
+            "Previous approaches failed repeatedly. "
+            "Try something fundamentally different:",
             "- If automation failed, try manual rewriting",
-            "- If rewriting failed, try case analysis or intermediate lemmas",
-            "- If direct proof failed, try a `calc` block or term-mode proof",
+            "- If rewriting failed, try case analysis "
+            "or intermediate lemmas",
+            "- If direct proof failed, try a `calc` block "
+            "or term-mode proof",
             "",
         ])
 
@@ -1886,7 +2058,10 @@ async def subtask_executor_node(
 
     # Use iterative tactic loop (Phase 4.4)
     try:
-        tactics_used, success, final_goal = await iterative_tactic_loop(
+        (
+            tactics_used, success,
+            final_goal, _subtask_records,
+        ) = await iterative_tactic_loop(
             goal_state=initial_goal,
             file_path=sorry.file_path,
             line=sorry.line,
@@ -1896,6 +2071,8 @@ async def subtask_executor_node(
             consecutive_failure_threshold=3,
             context=context,
             mcp_client=mcp_client,
+            attempt_number=state.get("attempt_count", 1),
+            sorry_index=1,
         )
     except Exception as e:
         logger.warning(f"Iterative tactic loop failed: {e}")
@@ -2169,16 +2346,31 @@ async def direct_iterative_node(
 
     # Run iterative tactic loop with crash recovery
     import asyncio
-    from verifier.mcp_client import MCPWorkerCrashError, MCPUnavailableError
+    from verifier.mcp_client import (
+        MCPUnavailableError,
+        MCPWorkerCrashError,
+    )
 
     tactics_applied: list[str] = []
+    attempt_records: list[AttemptRecord] = []
     success = False
     final_goal = initial_goal
+
+    # Extract attempt number and sorry index for VP files
+    attempt_number = state.get("attempt_count", 1)
+    sorry_data = state.get("sorry_location", {})
+    sorry_index = (
+        sorry_data.get("index", 1)
+        if isinstance(sorry_data, dict) else 1
+    )
 
     max_retries = 3
     for retry in range(max_retries):
         try:
-            tactics_applied, success, final_goal = await iterative_tactic_loop(
+            (
+                tactics_applied, success,
+                final_goal, attempt_records,
+            ) = await iterative_tactic_loop(
                 goal_state=initial_goal,
                 file_path=sorry.file_path,
                 line=sorry.line,
@@ -2188,49 +2380,80 @@ async def direct_iterative_node(
                 consecutive_failure_threshold=3,
                 context=context,
                 mcp_client=mcp_client,
+                attempt_number=attempt_number,
+                sorry_index=sorry_index,
             )
-            break  # Normal completion (success or failure), exit retry loop
+            break  # Normal exit
         except MCPWorkerCrashError as e:
-            logger.error(f"MCP crashed (retry {retry+1}/{max_retries}): {e}")
-            mcp_client = None  # Force single-shot fallback on next retry
+            logger.error(
+                f"MCP crashed (retry {retry+1}/{max_retries}): "
+                f"{e}"
+            )
+            mcp_client = None
             if retry < max_retries - 1:
                 await asyncio.sleep(2 ** (retry + 1))
         except MCPUnavailableError as e:
             logger.error(f"MCP unavailable: {e}")
             mcp_client = None
-            break  # Don't retry if circuit breaker tripped
+            break
         except Exception as e:
-            logger.warning(f"Iterative tactic loop failed: {e}")
+            logger.warning(
+                f"Iterative tactic loop failed: {e}"
+            )
             break
 
-    # Fallback: try simple verification if loop produced no result
+    # Fallback: try simple verification
     if not tactics_applied and not success:
         if verifier_service and state.get("current_proof"):
             try:
-                fallback_success, errors, _ = await verifier_service.verify_proof_on_copy(
-                    sorry=sorry,
-                    proof_code=state["current_proof"],
-                    attempt=state.get("attempt_count", 1),
-                    model_used=model,
-                    temperature=temperature,
+                fallback_ok, errors, _ = (
+                    await verifier_service.verify_proof_on_copy(
+                        sorry=sorry,
+                        proof_code=state["current_proof"],
+                        attempt=state.get("attempt_count", 1),
+                        model_used=model,
+                        temperature=temperature,
+                    )
                 )
-                if fallback_success:
+                if fallback_ok:
                     tactics_applied = [state["current_proof"]]
                     success = True
                     final_goal = "no goals"
             except Exception as fallback_e:
-                logger.warning(f"Fallback verification also failed: {fallback_e}")
+                logger.warning(
+                    f"Fallback verification also failed: "
+                    f"{fallback_e}"
+                )
 
     # Build combined proof from tactics
-    combined_proof = "; ".join(tactics_applied) if tactics_applied else state.get("current_proof", "")
+    combined_proof = (
+        "; ".join(tactics_applied)
+        if tactics_applied
+        else state.get("current_proof", "")
+    )
 
     # Update goal state history
     goal_history = list(state.get("goal_state_history", []))
     if final_goal:
         goal_history.append(final_goal)
 
+    # Determine VP file path
+    from pathlib import Path as _Path
+    vp_path_str: Optional[str] = None
+    if sorry.file_path:
+        original = _Path(sorry.file_path)
+        vp_name = (
+            f"{original.stem}"
+            f"_VP{attempt_number}"
+            f"{original.suffix}"
+        )
+        vp_candidate = original.parent / vp_name
+        if vp_candidate.exists():
+            vp_path_str = str(vp_candidate)
+
     logger.info(
-        f"Direct iterative node result: {'SUCCESS' if success else 'FAILED'}, "
+        f"Direct iterative node result: "
+        f"{'SUCCESS' if success else 'FAILED'}, "
         f"tactics={len(tactics_applied)}"
     )
 
@@ -2240,21 +2463,31 @@ async def direct_iterative_node(
             "status": ProofStatus.SUCCESS.value,
             "current_proof": combined_proof,
             "tried_tactics": tactics_applied,
-            # Phase 4.4: Iterative refinement state updates
             "tactic_sequence": tactics_applied,
             "goal_state_history": goal_history,
             "goal_state": final_goal,
-            "tactic_step": state.get("tactic_step", 0) + len(tactics_applied),
+            "tactic_step": (
+                state.get("tactic_step", 0)
+                + len(tactics_applied)
+            ),
             "consecutive_failures": 0,
+            "attempt_records": attempt_records,
+            "output_file": vp_path_str,
         }
     else:
         return {
             "status": ProofStatus.FAILED.value,
             "tried_tactics": tactics_applied,
-            # Phase 4.4: Iterative refinement state updates
             "tactic_sequence": tactics_applied,
             "goal_state_history": goal_history,
             "goal_state": final_goal,
-            "tactic_step": state.get("tactic_step", 0) + len(tactics_applied),
-            "consecutive_failures": state.get("consecutive_failures", 0) + 1,
+            "tactic_step": (
+                state.get("tactic_step", 0)
+                + len(tactics_applied)
+            ),
+            "consecutive_failures": (
+                state.get("consecutive_failures", 0) + 1
+            ),
+            "attempt_records": attempt_records,
+            "output_file": vp_path_str,
         }

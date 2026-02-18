@@ -77,6 +77,19 @@ class RecoveryRecord(TypedDict):
     success: bool                   # Whether recovery succeeded
 
 
+class AttemptRecord(TypedDict):
+    """Record of a single outer attempt for the sliding window."""
+
+    number: int
+    snippet: str              # The tactic/snippet that was tried
+    normalized_error: str     # From ErrorMessageNormalizer
+    error_type: str           # "unknown_identifier", "type_mismatch", etc.
+    goal_state_after: str     # Goal state after the attempt (or empty)
+    suggestion: str           # Normalizer's suggestion
+    rag_suggestions: list[str]  # RAG-suggested alternatives (for unknown_identifier)
+    elapsed_seconds: float
+
+
 class SubTaskRecord(TypedDict):
     """Record of a ROMA subtask execution."""
 
@@ -212,6 +225,9 @@ class ProofState(TypedDict):
     max_tactic_steps: int                   # Max tactics per attempt (default 15)
     consecutive_failures: int               # Counter for adaptive re-analysis trigger
 
+    # === Attempt Records (Phase 03 sliding window) ===
+    attempt_records: Annotated[list[AttemptRecord], operator.add]  # Structured error memory
+
     # === ROMA Hierarchical Decomposition Fields ===
     roma_active: bool                       # Whether ROMA decomposition is active
     roma_complexity: Optional[str]          # GoalComplexity value (atomic/simple/moderate/complex)
@@ -343,6 +359,9 @@ def create_initial_state(
         tactic_step=0,
         max_tactic_steps=15,
         consecutive_failures=0,
+
+        # Attempt Records (Phase 03 sliding window)
+        attempt_records=[],
 
         # ROMA Hierarchical Decomposition (initialized fresh)
         roma_active=False,
