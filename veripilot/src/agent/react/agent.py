@@ -140,7 +140,7 @@ class ReActAgent:
     def __init__(
         self,
         mode: AgentMode = AgentMode.REACT,
-        max_attempts: int = 4,
+        max_attempts: int = 5,
         model: str = "gemini-3-pro-preview",
         temperature: float = 0.2,
         project_dir: Optional[str] = None,
@@ -671,7 +671,7 @@ async def verify_with_react(
     verifier_service: Optional["VerifierService"] = None,
     rag: Optional[Any] = None,
     mode: AgentMode = AgentMode.REACT,
-    max_attempts: int = 4,
+    max_attempts: int = 5,
     project_dir: Optional[str] = None,
 ) -> "VerificationResult":
     """

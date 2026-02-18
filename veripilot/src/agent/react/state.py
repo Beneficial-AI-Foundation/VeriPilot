@@ -243,7 +243,7 @@ def create_initial_state(
     rag_results: Optional[list[dict]] = None,
     model_used: str = "gemini-3-pro-preview",
     temperature: float = 0.2,
-    max_attempts: int = 4,
+    max_attempts: int = 5,
     mode: AgentMode = AgentMode.REACT,
     project_dir: Optional[str] = None,
 ) -> ProofState:

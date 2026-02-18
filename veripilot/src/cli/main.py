@@ -17,6 +17,8 @@ from rich.prompt import Prompt, IntPrompt, Confirm
 from rich.table import Table
 from dotenv import load_dotenv
 
+from cli.logging_config import configure_logging
+
 # Version info
 __version__ = "0.1.0"
 
@@ -49,8 +51,8 @@ MODEL_OPTIONS = [
     ("claude-opus", "Claude Opus 4.5", "Via Anthropic API - highest quality"),
 ]
 
-# Default max verification attempts
-MAX_ATTEMPTS = 4
+# Default max verification attempts (outer attempts, user-visible)
+DEFAULT_MAX_ATTEMPTS = 5
 
 
 def find_lean_project_root(file_path: str) -> Optional[str]:
@@ -404,6 +406,8 @@ async def run_verification(
     custom_prompt: Optional[str] = None,
     use_lsp: bool = True,
     agent_mode: AgentMode = AgentMode.JUST_RETRY,
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+    verbose: bool = False,
 ):
     """
     Run the verification process.
@@ -416,7 +420,12 @@ async def run_verification(
         custom_prompt: Optional custom prompt
         use_lsp: Use LSP for instant verification (default True)
         agent_mode: Verification agent mode (JUST_RETRY, REACT, etc.)
+        max_attempts: Max outer attempts per sorry (default 5)
+        verbose: Enable verbose output and log files
     """
+    # Configure logging before any agent code runs
+    log_dir = configure_logging(verbose=verbose)
+
     console.print(f"\n[bold cyan]Verifying:[/bold cyan] {Path(file_path).name}")
     console.print(f"[bold cyan]Model:[/bold cyan] {PROVIDERS[model].name}")
     console.print(f"[bold cyan]Temperature:[/bold cyan] {temperature}")
@@ -528,7 +537,7 @@ async def run_verification(
                     console.print(f"  [dim]Verifying with {agent_mode.value} agent...[/dim]")
                     react_agent = ReActAgent(
                         mode=agent_mode,
-                        max_attempts=MAX_ATTEMPTS,
+                        max_attempts=max_attempts,
                         model=model,
                         temperature=temperature,
                         project_dir=project_dir,
@@ -552,7 +561,7 @@ async def run_verification(
                         proof_result=initial_result,
                         verifier_service=verifier_service,
                         rag=rag,
-                        max_attempts=MAX_ATTEMPTS,
+                        max_attempts=max_attempts,
                     )
                 else:
                     # Fall back to lake build verification
@@ -562,7 +571,7 @@ async def run_verification(
                         proof_result=initial_result,
                         rag=rag,
                         project_dir=project_dir,
-                        max_attempts=MAX_ATTEMPTS,
+                        max_attempts=max_attempts,
                     )
 
                 # Show result
@@ -622,6 +631,9 @@ async def run_verification(
         for name, reason in failed_proofs:
             console.print(f"  [dim]{name}:[/dim] {reason}")
 
+    if verbose:
+        console.print(f"\n[dim]Logs:[/dim] {log_dir}")
+
 
 @app.callback(invoke_without_command=True)
 def main(ctx: typer.Context):
@@ -670,6 +682,7 @@ def main(ctx: typer.Context):
             context_path=context_path,
             custom_prompt=custom_prompt,
             agent_mode=agent_mode,
+            max_attempts=DEFAULT_MAX_ATTEMPTS,
         ))
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted.[/yellow]")

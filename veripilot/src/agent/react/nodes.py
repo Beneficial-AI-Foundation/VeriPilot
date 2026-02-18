@@ -79,6 +79,35 @@ def log_llm_response(tactics: list[str], model: str) -> None:
 # Prompt Loading
 # ==============================================================================
 
+_ITERATIVE_SYSTEM_PROMPT_CACHE: str | None = None
+
+
+def _load_iterative_system_prompt() -> str:
+    """
+    Load the iterative system prompt from prompts/verifier/iterative_system_v1.md.
+
+    Uses caching for performance. Falls back to minimal prompt if file not found.
+    """
+    global _ITERATIVE_SYSTEM_PROMPT_CACHE
+
+    if _ITERATIVE_SYSTEM_PROMPT_CACHE is not None:
+        return _ITERATIVE_SYSTEM_PROMPT_CACHE
+
+    try:
+        from agent.prompt_loader import load_latest_prompt
+        _ITERATIVE_SYSTEM_PROMPT_CACHE = load_latest_prompt("iterative_system")
+        logger.debug("Loaded iterative system prompt from file")
+    except (ImportError, FileNotFoundError) as e:
+        logger.warning(f"Could not load iterative_system prompt: {e}, using fallback")
+        _ITERATIVE_SYSTEM_PROMPT_CACHE = (
+            "You are a Lean 4 theorem prover. Generate 1-3 atomic proof snippets "
+            "for the given goal state. Each snippet should be a small, self-contained "
+            "block of proof code. Separate snippets with --- markers."
+        )
+
+    return _ITERATIVE_SYSTEM_PROMPT_CACHE
+
+
 _REACT_SYSTEM_PROMPT_CACHE: str | None = None
 
 
@@ -527,6 +556,10 @@ async def iterative_tactic_loop(
     """
     Iteratively apply tactics using MCP edit_file for safe edit-check-revert testing.
 
+    Two-level attempt model:
+    - OUTER attempts: controlled by --max-attempts (default 5), user-visible, VP files numbered by this
+    - INNER steps: max_steps parameter (default 15), implementation detail, tactic candidates per outer attempt
+
     This is the core iterative refinement loop that addresses the "single-shot"
     architecture limitation. Instead of generating all tactics in one shot,
     it generates candidates, tests each via edit_file (which handles backup,
@@ -724,11 +757,12 @@ async def _generate_tactic_candidates(
 
     llm_client = LLMClient()
 
-    # Build prompt for tactic generation
+    # Load iterative system prompt (atomic snippet guidance)
+    system_prompt = _load_iterative_system_prompt()
+
+    # Build user prompt for snippet generation
     prompt_lines = [
-        "Generate 3-5 Lean 4 tactics to try on this goal state.",
-        "Each tactic should be on a separate line, starting with `-`.",
-        "Tactics should be specific and targeted based on the goal structure.",
+        "Generate 1-3 atomic proof snippets for this goal state.",
         "",
         "## Current Goal State",
         "```lean",
@@ -748,8 +782,8 @@ async def _generate_tactic_candidates(
     # Add tried tactics to avoid repetition
     if tried_tactics:
         prompt_lines.extend([
-            "## Tactics Already Tried (do not repeat)",
-            "\n".join(f"- {t}" for t in tried_tactics[-5:]),
+            "## Already Tried (do NOT repeat these)",
+            "\n".join(f"- `{t[:100]}`" for t in tried_tactics[-5:]),
             "",
         ])
 
@@ -757,21 +791,17 @@ async def _generate_tactic_candidates(
     if deep_analysis:
         prompt_lines.extend([
             "## Re-analysis Mode",
-            "Previous tactics failed repeatedly. Reconsider the approach:",
-            "- Look for patterns in the goal that suggest specific tactics",
-            "- Consider unfolding definitions",
-            "- Consider using hypotheses by name (rw, simp only)",
-            "- Consider intermediate lemmas (have h := ...)",
+            "Previous approaches failed repeatedly. Try something fundamentally different:",
+            "- If automation failed, try manual rewriting",
+            "- If rewriting failed, try case analysis or intermediate lemmas",
+            "- If direct proof failed, try a `calc` block or term-mode proof",
             "",
         ])
 
-    # Add output format
+    # Output format reminder
     prompt_lines.extend([
-        "## Output Format",
-        "List exactly 3-5 tactics, one per line, starting with `-`:",
-        "- tactic1",
-        "- tactic2",
-        "- etc.",
+        "## Output",
+        "Separate each snippet with `---`. No markdown fences.",
     ])
 
     prompt = "\n".join(prompt_lines)
@@ -790,9 +820,10 @@ async def _generate_tactic_candidates(
             prompt,
             model=model,
             temperature=gen_temp,
+            system_prompt=system_prompt,
         )
 
-        # Parse tactics from response
+        # Parse snippets from response (handles --- separators)
         tactics = _parse_tactic_list(response)
         log_llm_response(tactics[:5], model)
         return tactics[:5]  # Max 5
@@ -804,9 +835,10 @@ async def _generate_tactic_candidates(
 
 
 def _parse_tactic_list(response: str) -> list[str]:
-    """Parse list of tactics from LLM response.
+    """Parse list of tactics/snippets from LLM response.
 
     Handles multiple formats:
+    - --- separated blocks (atomic snippets, preferred)
     - Bulleted lists (-, *)
     - Numbered lists (1., 2.)
     - Code blocks (```lean ... ```)
@@ -814,8 +846,25 @@ def _parse_tactic_list(response: str) -> list[str]:
     """
     tactics = []
 
-    # Extract code blocks first
-    import re
+    # Try --- separated blocks first (atomic snippet format)
+    if "---" in response:
+        blocks = response.split("---")
+        for block in blocks:
+            # Strip each block and skip empty ones
+            snippet = block.strip()
+            # Skip blocks that are just markdown headers or explanatory text
+            if not snippet or snippet.startswith("#") or snippet.startswith("```"):
+                continue
+            # Strip code fences if wrapping the whole block
+            snippet = re.sub(r"^```(?:lean)?\s*\n?", "", snippet)
+            snippet = re.sub(r"\n?```\s*$", "", snippet)
+            snippet = snippet.strip()
+            if snippet and not snippet.startswith("You ") and not snippet.startswith("The "):
+                tactics.append(snippet)
+        if tactics:
+            return tactics
+
+    # Extract code blocks
     code_block_pattern = r"```(?:lean)?\s*\n(.*?)```"
     code_blocks = re.findall(code_block_pattern, response, re.DOTALL)
     for block in code_blocks:
@@ -855,7 +904,8 @@ def _parse_tactic_list(response: str) -> list[str]:
         # Accept lines that look like Lean tactics (start with common tactic keywords)
         elif any(line.startswith(kw) for kw in [
             "simp", "rfl", "ring", "omega", "exact", "apply", "intro", "constructor",
-            "rw", "have", "let", "unfold", "decide", "norm_num", "try", "sorry"
+            "rw", "have", "let", "unfold", "decide", "norm_num", "try", "sorry",
+            "cases", "rcases", "calc", "conv", "progress",
         ]):
             tactics.append(line)
 
