@@ -576,6 +576,7 @@ async def iterative_tactic_loop(
     mcp_client: Optional[Any] = None,
     attempt_number: int = 1,
     sorry_index: int = 1,
+    verbose: bool = False,
 ) -> tuple[list[str], bool, str, list[AttemptRecord]]:
     """
     Iteratively apply tactics using MCP edit_file_with_capture.
@@ -646,6 +647,43 @@ async def iterative_tactic_loop(
         )
         return tactics, success, final_goal, []
 
+    # Read initial goal from MCP if not provided
+    if not current_goal.strip() and mcp_client is not None:
+        logger.info(
+            f"Goal state empty — reading from MCP "
+            f"at {file_path}:{line}"
+        )
+        try:
+            goal_result = await mcp_client.get_goal(
+                file_path, line,
+            )
+            if goal_result and goal_result.goals_before:
+                current_goal = goal_result.goals_before
+                logger.info(
+                    f"Got goal from MCP: "
+                    f"{current_goal[:120]}"
+                )
+            elif goal_result and goal_result.goals_after:
+                current_goal = goal_result.goals_after
+                logger.info(
+                    f"Got goal (after) from MCP: "
+                    f"{current_goal[:120]}"
+                )
+            else:
+                logger.warning(
+                    "MCP returned no goal state"
+                )
+        except Exception as e:
+            logger.warning(
+                f"Failed to read goal from MCP: {e}"
+            )
+
+    if not current_goal.strip():
+        logger.warning(
+            "No goal state available — LLM will be "
+            "generating tactics without goal context"
+        )
+
     logger.info(
         f"Starting iterative tactic loop: "
         f"max_steps={max_steps}, attempt={attempt_number}"
@@ -656,6 +694,7 @@ async def iterative_tactic_loop(
         print_attempt_start(
             sorry_index, attempt_number,
             max_steps, current_goal,
+            verbose=verbose,
         )
 
     step_start_time = time.time()
@@ -695,6 +734,7 @@ async def iterative_tactic_loop(
             deep_analysis=needs_reanalysis,
             attempt_history=attempt_records,
             consecutive_failures=total_consecutive_failures,
+            verbose=verbose,
         )
 
         if not candidates:
@@ -717,6 +757,7 @@ async def iterative_tactic_loop(
             if _has_console:
                 print_attempt_trying(
                     sorry_index, attempt_number, candidate,
+                    verbose=verbose,
                 )
 
             candidate_start = time.time()
@@ -848,6 +889,7 @@ async def iterative_tactic_loop(
                 print_attempt_failure(
                     sorry_index, attempt_number,
                     max_steps, error_summary,
+                    verbose=verbose,
                 )
 
     # Max steps reached
@@ -859,6 +901,7 @@ async def iterative_tactic_loop(
         print_attempt_failure(
             sorry_index, attempt_number,
             max_steps, "max steps reached",
+            verbose=verbose,
         )
     return (
         tactics_applied, False,
@@ -926,6 +969,7 @@ async def _generate_tactic_candidates(
     deep_analysis: bool,
     attempt_history: list[AttemptRecord],
     consecutive_failures: int = 0,
+    verbose: bool = False,
 ) -> list[str]:
     """
     Generate candidate tactics for the current goal state.
@@ -1029,6 +1073,14 @@ async def _generate_tactic_candidates(
                     f"**Did you mean:** {alts}"
                 )
             prompt_lines.append("")
+
+    # Verbose: print sliding window to console
+    if verbose and attempt_history:
+        try:
+            from cli.console_output import print_sliding_window
+            print_sliding_window(attempt_history)
+        except ImportError:
+            pass
 
     # Add guidance based on analysis depth
     if deep_analysis:
@@ -2193,6 +2245,7 @@ async def subtask_executor_node(
             mcp_client=mcp_client,
             attempt_number=state.get("attempt_count", 1),
             sorry_index=1,
+            verbose=state.get("verbose", False),
         )
     except Exception as e:
         logger.warning(f"Iterative tactic loop failed: {e}")
@@ -2502,6 +2555,7 @@ async def direct_iterative_node(
                 mcp_client=mcp_client,
                 attempt_number=attempt_number,
                 sorry_index=sorry_index,
+                verbose=state.get("verbose", False),
             )
             break  # Normal exit
         except MCPWorkerCrashError as e:

@@ -70,6 +70,14 @@ def configure_logging(verbose: bool = False) -> Path:
     root.addHandler(session_handler)
     root.addHandler(console_handler)
 
+    # Suppress noisy third-party loggers everywhere
+    # (HTTP wire protocol noise is not useful even in log files)
+    for noisy in (
+        "httpx", "httpcore", "openai", "urllib3",
+        "asyncio", "hpack", "h2",
+    ):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
     # Configure LLM output logger (propagate=True so it also goes to session log)
     llm_logger = logging.getLogger("veripilot.llm_output")
     llm_logger.addHandler(llm_handler)

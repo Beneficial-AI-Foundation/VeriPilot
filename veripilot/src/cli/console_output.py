@@ -37,6 +37,45 @@ def print_attempt_start(
         console.print(f"  [dim]{goal_state}[/dim]")
 
 
+def print_sliding_window(
+    attempt_history: list[dict],
+    window_size: int = 3,
+) -> None:
+    """Print the sliding window of recent attempts (verbose mode only).
+
+    Shows the last ``window_size`` attempts with snippet, error, and
+    suggestion so the user can see what the LLM is learning from.
+    """
+    if not attempt_history:
+        return
+    recent = attempt_history[-window_size:]
+    console.print(
+        "  [dim]--- sliding window "
+        f"(last {len(recent)}) ---[/dim]"
+    )
+    for a in recent:
+        snippet_preview = a.get("snippet", "?")[:80]
+        error = a.get("normalized_error", "?")[:80]
+        suggestion = a.get("suggestion", "")[:60]
+        line = Text()
+        line.append(f"    #{a.get('number', '?')} ", style="dim")
+        line.append(f"`{snippet_preview}`", style="cyan")
+        console.print(line)
+        console.print(f"      err: {error}", style="red dim")
+        if suggestion:
+            console.print(
+                f"      hint: {suggestion}",
+                style="yellow dim",
+            )
+        rag = a.get("rag_suggestions", [])
+        if rag:
+            console.print(
+                f"      did you mean: {', '.join(rag[:3])}",
+                style="green dim",
+            )
+    console.print("  [dim]--- end window ---[/dim]")
+
+
 def print_attempt_trying(
     sorry_idx: int,
     attempt: int,

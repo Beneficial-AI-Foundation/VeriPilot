@@ -636,7 +636,13 @@ async def run_verification(
 
 
 @app.callback(invoke_without_command=True)
-def main(ctx: typer.Context):
+def main(
+    ctx: typer.Context,
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v",
+        help="Show LLM details and sliding window",
+    ),
+):
     """
     VeriPilot Interactive CLI.
 
@@ -656,6 +662,13 @@ def main(ctx: typer.Context):
     file_path = get_lean_file_path()
     mode, context_path, custom_prompt = select_mode()
 
+    # Advanced options
+    max_attempts = IntPrompt.ask(
+        "Max attempts per sorry",
+        default=DEFAULT_MAX_ATTEMPTS,
+    )
+    max_attempts = max(1, min(20, max_attempts))
+
     # Confirmation
     console.print("\n" + "─" * 40)
     console.print("[bold]Ready to verify:[/bold]")
@@ -663,6 +676,8 @@ def main(ctx: typer.Context):
     console.print(f"  Model: {PROVIDERS[model].name}")
     console.print(f"  Temperature: {temperature}")
     console.print(f"  Agent: {agent_mode.value}")
+    console.print(f"  Max attempts: {max_attempts}")
+    console.print(f"  Verbose: {verbose}")
     if context_path:
         console.print(f"  Context: {context_path}")
     if custom_prompt:
@@ -682,7 +697,8 @@ def main(ctx: typer.Context):
             context_path=context_path,
             custom_prompt=custom_prompt,
             agent_mode=agent_mode,
-            max_attempts=DEFAULT_MAX_ATTEMPTS,
+            max_attempts=max_attempts,
+            verbose=verbose,
         ))
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted.[/yellow]")
