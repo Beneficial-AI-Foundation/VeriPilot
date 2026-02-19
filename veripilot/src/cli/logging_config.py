@@ -75,6 +75,7 @@ def configure_logging(verbose: bool = False) -> Path:
     for noisy in (
         "httpx", "httpcore", "openai", "urllib3",
         "asyncio", "hpack", "h2",
+        "neo4j", "sentence_transformers", "transformers", "safetensors",
     ):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 

@@ -80,10 +80,25 @@ class BGEEmbeddings(EmbeddingProviderABC):
 
         console.print(f"[blue]Loading embedding model: {self._model_name}[/blue]")
 
+        # Suppress noisy LOAD REPORT from safetensors/transformers
+        import os
+        import logging as _logging
+        _prev = os.environ.get("TRANSFORMERS_VERBOSITY")
+        os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+        _logging.getLogger("transformers.modeling_utils").setLevel(
+            _logging.ERROR
+        )
+
         self._model = SentenceTransformer(
             self._model_name,
             device=self._device,
         )
+
+        # Restore
+        if _prev is None:
+            os.environ.pop("TRANSFORMERS_VERBOSITY", None)
+        else:
+            os.environ["TRANSFORMERS_VERBOSITY"] = _prev
 
         # Print device info
         device = str(self._model.device)

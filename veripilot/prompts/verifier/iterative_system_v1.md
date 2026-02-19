@@ -37,6 +37,7 @@ Choose from these patterns based on the goal structure:
 - Each snippet should be small enough to verify independently. One step of progress is better than an entire proof attempt.
 - Do NOT repeat tactics that have already been tried and failed.
 - Prefer explicit hypothesis names (`rw [h]`) over wildcards (`simp [*]`).
+- **NEVER use `native_decide`** — it bypasses the kernel and defeats the purpose of formal verification.
 
 ## Output Format
 

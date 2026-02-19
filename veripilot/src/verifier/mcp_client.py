@@ -508,6 +508,30 @@ class LeanMCPClient:
             line_context=result.get("line_context"),
         )
 
+    @staticmethod
+    def _indent_tactic(target_line: str, tactic: str) -> str:
+        """Replace 'sorry' in target_line with tactic, indenting continuation lines.
+
+        For multi-line tactics, continuation lines inherit the indentation
+        of the sorry token so that Lean's whitespace-sensitive parser
+        sees them inside the same tactic block.
+        """
+        sorry_idx = target_line.find("sorry")
+        if sorry_idx < 0:
+            return target_line
+
+        indent = target_line[:sorry_idx]
+
+        if "\n" in tactic:
+            tactic_lines = tactic.split("\n")
+            indented = tactic_lines[0] + "\n" + "\n".join(
+                (indent + ln) if ln.strip() else ln
+                for ln in tactic_lines[1:]
+            )
+            return target_line.replace("sorry", indented, 1)
+
+        return target_line.replace("sorry", tactic, 1)
+
     async def edit_file(
         self,
         file_path: str,
@@ -556,7 +580,7 @@ class LeanMCPClient:
             if "sorry" not in target_line.lower():
                 return (False, None, f"No 'sorry' found on line {line}")
 
-            new_line = target_line.replace("sorry", tactic, 1)
+            new_line = self._indent_tactic(target_line, tactic)
             lines[line - 1] = new_line
             path.write_text("".join(lines))
             logger.debug(f"Edited {file_path}:{line} — replaced sorry with: {tactic}")
@@ -564,11 +588,19 @@ class LeanMCPClient:
             # 4. Wait for Lean to reprocess
             await asyncio.sleep(0.5)
 
-            # 5. Check new goal state
-            new_goal = await self.get_goal(file_path, line, column)
+            # For multi-line tactics, check all inserted lines
+            tactic_end_line = line + tactic.count('\n')
 
-            # Check for errors at the edited line
-            diagnostics = await self.get_diagnostics(file_path, start_line=line, end_line=line)
+            # 5. Check new goal state (read from last tactic line)
+            new_goal = await self.get_goal(
+                file_path, tactic_end_line, column,
+            )
+
+            # Check for errors across all tactic lines
+            diagnostics = await self.get_diagnostics(
+                file_path, start_line=line,
+                end_line=tactic_end_line,
+            )
             errors = [d for d in diagnostics if d.severity == "error"]
 
             if errors:
@@ -662,7 +694,7 @@ class LeanMCPClient:
                     f"No 'sorry' found on line {line}", None,
                 )
 
-            new_line = target_line.replace("sorry", tactic, 1)
+            new_line = self._indent_tactic(target_line, tactic)
             lines[line - 1] = new_line
             path.write_text("".join(lines))
 
@@ -677,14 +709,18 @@ class LeanMCPClient:
             # 4. Wait for Lean to reprocess
             await asyncio.sleep(0.5)
 
-            # 5. Check new goal state
+            # For multi-line tactics, check all inserted lines
+            tactic_end_line = line + tactic.count('\n')
+
+            # 5. Check new goal state (read from last tactic line)
             new_goal = await self.get_goal(
-                file_path, line, column,
+                file_path, tactic_end_line, column,
             )
 
-            # Check for errors at the edited line
+            # Check for errors across all tactic lines
             diagnostics = await self.get_diagnostics(
-                file_path, start_line=line, end_line=line,
+                file_path, start_line=line,
+                end_line=tactic_end_line,
             )
             errors = [d for d in diagnostics if d.severity == "error"]
 

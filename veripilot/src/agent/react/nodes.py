@@ -63,6 +63,11 @@ llm_logger = logging.getLogger("veripilot.llm_output")
 # prompt to break out of repetitive failure patterns.
 STRATEGY_SHIFT_THRESHOLD = 5
 
+# Tactics that must never be sent to the Lean file, even if the LLM
+# generates them.  native_decide bypasses the kernel and defeats formal
+# verification.
+BANNED_TACTICS = ("native_decide",)
+
 STRATEGY_SHIFT_PROMPT = """## Strategy Shift Required
 
 The following {n} approaches have ALL FAILED on this goal:
@@ -627,6 +632,9 @@ async def iterative_tactic_loop(
     # (never reset by re-analysis threshold, only by actual success).
     # Fed to _generate_tactic_candidates for strategy shift detection.
     total_consecutive_failures = 0
+    # VP file counter: each step writes a separate VP{N}.lean so the
+    # user can inspect every intermediate attempt.
+    vp_counter = 0
     llm_client = LLMClient()
     normalizer = ErrorMessageNormalizer()
 
@@ -796,7 +804,29 @@ async def iterative_tactic_loop(
                     f"'{candidate[:50]}...' succeeded"
                 )
 
-                if _is_goal_closed(new_goal_str):
+                proof_complete = _is_goal_closed(new_goal_str)
+
+                # Fallback: for multi-line tactics the goal may
+                # have been read from an intermediate position.
+                # A clean full-file diagnostic check confirms
+                # the proof is actually complete.
+                if not proof_complete:
+                    full_diags = (
+                        await mcp_client.get_diagnostics(
+                            file_path
+                        )
+                    )
+                    proof_complete = not any(
+                        d.severity == "error"
+                        for d in full_diags
+                    )
+                    if proof_complete:
+                        logger.info(
+                            "Proof complete (full-file "
+                            f"check): {candidate[:50]}..."
+                        )
+
+                if proof_complete:
                     elapsed = time.time() - step_start_time
                     logger.info(
                         f"Goal closed by tactic: "
@@ -810,10 +840,11 @@ async def iterative_tactic_loop(
 
                     # Write VP file with successful content
                     if last_modified_content is not None:
+                        vp_counter += 1
                         original = _Path(file_path)
                         vp_name = (
                             f"{original.stem}"
-                            f"_VP{attempt_number}"
+                            f"_VP{vp_counter}"
                             f"{original.suffix}"
                         )
                         vp_path = original.parent / vp_name
@@ -824,7 +855,7 @@ async def iterative_tactic_loop(
 
                     return (
                         tactics_applied, True,
-                        current_goal, attempt_records,
+                        "no goals", attempt_records,
                     )
                 break
             elif error_msg:
@@ -864,12 +895,13 @@ async def iterative_tactic_loop(
                 )
                 attempt_records.append(record)
 
-        # After trying all candidates, write VP file
+        # After trying all candidates, write VP file (one per step)
         if last_modified_content is not None:
+            vp_counter += 1
             original = _Path(file_path)
             vp_name = (
                 f"{original.stem}"
-                f"_VP{attempt_number}"
+                f"_VP{vp_counter}"
                 f"{original.suffix}"
             )
             vp_path = original.parent / vp_name
@@ -1127,6 +1159,19 @@ async def _generate_tactic_candidates(
 
         # Parse snippets from response (handles --- separators)
         tactics = _parse_tactic_list(response)
+
+        # Hard filter: strip tactics that bypass formal verification
+        before = len(tactics)
+        tactics = [
+            t for t in tactics
+            if not any(b in t for b in BANNED_TACTICS)
+        ]
+        if len(tactics) < before:
+            logger.info(
+                f"Filtered {before - len(tactics)} banned "
+                f"tactic(s) from LLM response"
+            )
+
         log_llm_response(tactics[:5], model)
         return tactics[:5]  # Max 5
 
@@ -2611,19 +2656,16 @@ async def direct_iterative_node(
     if final_goal:
         goal_history.append(final_goal)
 
-    # Determine VP file path
+    # Determine VP file path (find latest VP{N} file)
     from pathlib import Path as _Path
     vp_path_str: Optional[str] = None
     if sorry.file_path:
         original = _Path(sorry.file_path)
-        vp_name = (
-            f"{original.stem}"
-            f"_VP{attempt_number}"
-            f"{original.suffix}"
+        vp_files = sorted(
+            original.parent.glob(f"{original.stem}_VP*{original.suffix}"),
         )
-        vp_candidate = original.parent / vp_name
-        if vp_candidate.exists():
-            vp_path_str = str(vp_candidate)
+        if vp_files:
+            vp_path_str = str(vp_files[-1])
 
     logger.info(
         f"Direct iterative node result: "
